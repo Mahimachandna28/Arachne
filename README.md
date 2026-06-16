@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Concurrent Web Crawler in Go
 A worker-pool based web crawler built with Go's goroutines, channels, and sync primitives — demonstrating real-world concurrency patterns.
 
@@ -210,3 +211,6 @@ Ideas for extension:
 - [ ] Persistent storage (SQLite) for results
 - [ ] Prometheus metrics for crawl stats
 - [ ] Context-based cancellation for graceful shutdown
+=======
+# Arachne
+>>>>>>> b7c7c2fc041629ef4975e74c6bbb047176302a42
