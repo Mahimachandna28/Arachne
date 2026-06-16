@@ -1,6 +1,6 @@
-<<<<<<< HEAD
+
 # Concurrent Web Crawler in Go
-A worker-pool based web crawler built with Go's goroutines, channels, and sync primitives — demonstrating real-world concurrency patterns.
+A worker-pool based web crawler built with Go's goroutines, channels, and sync primitives demonstrating real-world concurrency patterns.
 
 ---
 
@@ -95,7 +95,7 @@ webcrawler/
 
 ```bash
 git clone https://github.com/MahimaChandna28/webcrawler.git
-cd webcrawler
+cd Arachne
 
 # Run with default seeds from seeds/seeds.txt
 go run ./cmd/crawler
