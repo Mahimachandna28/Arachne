@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-webcrawler
-crawler
+/webcrawler
+/crawler
 
 # Test binary
 *.test
