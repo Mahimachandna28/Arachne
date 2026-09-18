@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Arachne — Concurrent Web Crawler Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #111827;
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.25);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.12);
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --error-bg: rgba(239, 68, 68, 0.12);
+      --code-bg: #030712;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      padding: 2rem 1.5rem;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 2rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+    }
+
+    .brand-icon {
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #6366f1, #a855f7);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      box-shadow: 0 4px 16px var(--accent-glow);
+    }
+
+    .brand h1 {
+      font-size: 1.6rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .brand p {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-live {
+      background: var(--success-bg);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .badge-live::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    .btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+      box-shadow: 0 4px 14px var(--accent-glow);
+    }
+
+    .btn-primary:hover {
+      background: #4f46e5;
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+    }
+
+    .stat-label {
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.35rem;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    /* CLI command banner */
+    .cli-banner {
+      background: linear-gradient(180deg, rgba(99, 102, 241, 0.08) 0%, rgba(17, 24, 39, 0.6) 100%);
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .cli-banner-text p {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      margin-bottom: 0.35rem;
+    }
+
+    .cli-code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      background: var(--code-bg);
+      padding: 0.4rem 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      color: #c7d2fe;
+      user-select: all;
+    }
+
+    /* Table Section */
+    .table-container {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .table-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--card-border);
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .table-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    .search-input {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      min-width: 260px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 0.85rem 1.5rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    td {
+      padding: 1rem 1.5rem;
+      font-size: 0.88rem;
+      border-bottom: 1px solid var(--card-border);
+      vertical-align: middle;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .status-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 0.75rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      display: inline-block;
+    }
+
+    .status-200 {
+      background: var(--success-bg);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-err {
+      background: var(--error-bg);
+      color: var(--error);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .url-cell {
+      max-width: 380px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .url-link {
+      color: #93c5fd;
+      text-decoration: none;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+    }
+
+    .url-link:hover {
+      text-decoration: underline;
+    }
+
+    .links-badge {
+      background: rgba(255, 255, 255, 0.06);
+      padding: 0.2rem 0.55rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .links-badge:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: var(--text);
+    }
+
+    /* Empty state */
+    .empty-state {
+      padding: 4rem 2rem;
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .empty-state-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+
+    /* Modal for links drawer */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    .modal {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      max-width: 650px;
+      width: 100%;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+    }
+
+    .modal-header {
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+
+    .modal-body {
+      padding: 1.5rem;
+      overflow-y: auto;
+    }
+
+    .links-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .links-list li {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      padding: 0.45rem 0.75rem;
+      background: var(--code-bg);
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="brand-icon">🕷️</div>
+        <div>
+          <h1>Arachne</h1>
+          <p>Concurrent Go Web Crawler — Live Results Inspector</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="badge badge-live" id="statusBadge">Checking Data</span>
+        <button class="btn" onclick="fetchResults()">🔄 Refresh</button>
+        <button class="btn btn-primary" onclick="openRawJSON()">View JSON</button>
+      </div>
+    </header>
+
+    <!-- Stats Grid -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Pages Crawled</div>
+        <div class="stat-value" id="totalPages">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Discovered Links</div>
+        <div class="stat-value" id="totalLinks">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Success Rate</div>
+        <div class="stat-value" id="successRate">100%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Unique Domains</div>
+        <div class="stat-value" id="uniqueDomains">0</div>
+      </div>
+    </div>
+
+    <!-- Quick Run Info -->
+    <div class="cli-banner">
+      <div class="cli-banner-text">
+        <p><strong>To run a new crawl and update these results:</strong></p>
+        <div class="cli-code">go run ./cmd/crawler -seed="https://go.dev" -workers=5 -maxpages=20</div>
+      </div>
+      <button class="btn" onclick="copyCommand()">📋 Copy Command</button>
+    </div>
+
+    <!-- Results Table -->
+    <div class="table-container">
+      <div class="table-header-bar">
+        <div class="table-title">Crawled Pages (<span id="resultsCount">0</span>)</div>
+        <input type="text" class="search-input" id="searchInput" placeholder="Filter by URL or title..." oninput="filterResults()">
+      </div>
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 100px;">Status</th>
+              <th>Page Title</th>
+              <th>Target URL</th>
+              <th style="width: 140px; text-align: center;">Links Extracted</th>
+            </tr>
+          </thead>
+          <tbody id="resultsTableBody">
+            <tr>
+              <td colspan="4">
+                <div class="empty-state">
+                  <div class="empty-state-icon">⏳</div>
+                  <p>Loading results from results.json...</p>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal for extracted links -->
+  <div class="modal-backdrop" id="linksModal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title" id="modalTitle">Extracted Links</div>
+        <button class="btn" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <ul class="links-list" id="modalLinksList"></ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentData = [];
+
+    async function fetchResults() {
+      const badge = document.getElementById('statusBadge');
+      try {
+        const response = await fetch('/results.json?' + new Date().getTime());
+        if (!response.ok) {
+          throw new Error('results.json not found');
+        }
+        currentData = await response.json();
+        renderDashboard(currentData);
+        badge.className = 'badge badge-live';
+        badge.textContent = 'Results Synced';
+      } catch (err) {
+        console.error(err);
+        badge.className = 'badge';
+        badge.style.background = 'var(--error-bg)';
+        badge.style.color = 'var(--error)';
+        badge.textContent = 'No Data Found';
+        renderEmptyState();
+      }
+    }
+
+    function renderDashboard(pages) {
+      document.getElementById('totalPages').textContent = pages.length;
+      document.getElementById('resultsCount').textContent = pages.length;
+
+      let totalLinks = 0;
+      let successCount = 0;
+      const domains = new Set();
+
+      pages.forEach(p => {
+        if (p.Links) totalLinks += p.Links.length;
+        if (!p.Error && p.StatusCode >= 200 && p.StatusCode < 400) successCount++;
+        try {
+          const u = new URL(p.URL);
+          domains.add(u.hostname);
+        } catch(e) {}
+      });
+
+      document.getElementById('totalLinks').textContent = totalLinks.toLocaleString();
+      document.getElementById('uniqueDomains').textContent = domains.size;
+      const rate = pages.length > 0 ? Math.round((successCount / pages.length) * 100) : 100;
+      document.getElementById('successRate').textContent = rate + '%';
+
+      renderTable(pages);
+    }
+
+    function renderTable(pages) {
+      const tbody = document.getElementById('resultsTableBody');
+      if (pages.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4">
+              <div class="empty-state">
+                <div class="empty-state-icon">🔍</div>
+                <p>No crawled pages match your filter.</p>
+              </div>
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = pages.map((page, idx) => {
+        const isOk = !page.Error && page.StatusCode >= 200 && page.StatusCode < 400;
+        const statusClass = isOk ? 'status-200' : 'status-err';
+        const statusText = page.StatusCode || (page.Error ? 'ERR' : '200');
+        const title = page.Title ? escapeHtml(page.Title) : '<span style="color:var(--text-muted);font-style:italic;">No Title</span>';
+        const linksCount = page.Links ? page.Links.length : 0;
+
+        return `
+          <tr>
+            <td><span class="status-pill ${statusClass}">${statusText}</span></td>
+            <td><strong>${title}</strong></td>
+            <td class="url-cell">
+              <a href="${page.URL}" target="_blank" class="url-link" title="${page.URL}">${escapeHtml(page.URL)}</a>
+            </td>
+            <td style="text-align: center;">
+              <span class="links-badge" onclick="showLinks(${idx})">
+                🔗 ${linksCount} links
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderEmptyState() {
+      const tbody = document.getElementById('resultsTableBody');
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="4">
+            <div class="empty-state">
+              <div class="empty-state-icon">📂</div>
+              <h3>results.json not found yet</h3>
+              <p style="margin-top: 0.5rem;">Run the crawler in your terminal to generate data:</p>
+              <div class="cli-code" style="display:inline-block; margin-top: 0.75rem;">
+                go run ./cmd/crawler -seed="https://go.dev"
+              </div>
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+
+    function filterResults() {
+      const q = document.getElementById('searchInput').value.toLowerCase();
+      const filtered = currentData.filter(p => {
+        return (p.URL && p.URL.toLowerCase().includes(q)) || 
+               (p.Title && p.Title.toLowerCase().includes(q));
+      });
+      document.getElementById('resultsCount').textContent = filtered.length;
+      renderTable(filtered);
+    }
+
+    function showLinks(idx) {
+      const page = currentData[idx];
+      if (!page || !page.Links) return;
+
+      document.getElementById('modalTitle').textContent = `Links from: ${page.Title || page.URL}`;
+      const list = document.getElementById('modalLinksList');
+      if (page.Links.length === 0) {
+        list.innerHTML = '<li>No outbound links discovered on this page.</li>';
+      } else {
+        list.innerHTML = page.Links.map(l => `<li>${escapeHtml(l)}</li>`).join('');
+      }
+      document.getElementById('linksModal').style.display = 'flex';
+    }
+
+    function closeModal() {
+      document.getElementById('linksModal').style.display = 'none';
+    }
+
+    function openRawJSON() {
+      window.open('/results.json', '_blank');
+    }
+
+    function copyCommand() {
+      navigator.clipboard.writeText('go run ./cmd/crawler -seed="https://go.dev" -workers=5 -maxpages=20');
+      alert('Command copied to clipboard!');
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+    }
+
+    // Close modal on click outside
+    document.getElementById('linksModal').addEventListener('click', (e) => {
+      if (e.target.id === 'linksModal') closeModal();
+    });
+
+    // Auto-fetch on load
+    fetchResults();
+  </script>
+</body>
+</html>
