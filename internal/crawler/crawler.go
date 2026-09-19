@@ -19,6 +19,7 @@ import (
 	"github.com/mahimachandna28/webcrawler/internal/parser"
 	"github.com/mahimachandna28/webcrawler/internal/ratelimiter"
 	"github.com/mahimachandna28/webcrawler/internal/result"
+	"github.com/mahimachandna28/webcrawler/internal/robots"
 )
 
 // Config holds the configuration for a crawl run.
@@ -41,28 +42,31 @@ type job struct {
 // Crawler orchestrates the worker pool and manages shared state.
 type Crawler struct {
 	config      Config
-	jobCh       chan job         // Channel workers read jobs from
-	resultCh    chan result.Page // Channel workers send results to
-	jobWg       sync.WaitGroup  // Tracks in-flight jobs (not workers)
-	visited     map[string]bool // Tracks visited URLs
-	visitedMu   sync.Mutex      // Protects the visited map
-	pageCount   int             // Total pages crawled so far
-	pageCountMu sync.Mutex      // Protects pageCount
+	jobCh       chan job                  // Channel workers read jobs from
+	resultCh    chan result.Page          // Channel workers send results to
+	jobWg       sync.WaitGroup           // Tracks in-flight jobs (not workers)
+	visited     map[string]bool          // Tracks visited URLs
+	visitedMu   sync.Mutex               // Protects the visited map
+	pageCount   int                      // Total pages crawled so far
+	pageCountMu sync.Mutex               // Protects pageCount
 	limiter     *ratelimiter.RateLimiter
 	client      *http.Client
+	robotsCache map[string]*robots.Policy // Thread-safe cache of robots.txt policy per domain
+	robotsMu    sync.Mutex               // Protects robotsCache
 }
 
 // New creates a new Crawler with the given configuration.
 func New(cfg Config) *Crawler {
 	return &Crawler{
-		config:   cfg,
-		jobCh:    make(chan job, cfg.Workers*20), // Buffered to reduce blocking
-		resultCh: make(chan result.Page, cfg.Workers*20),
-		visited:  make(map[string]bool),
-		limiter:  ratelimiter.New(cfg.RateLimit),
+		config:      cfg,
+		jobCh:       make(chan job, cfg.Workers*20), // Buffered to reduce blocking
+		resultCh:    make(chan result.Page, cfg.Workers*20),
+		visited:     make(map[string]bool),
+		limiter:     ratelimiter.New(cfg.RateLimit),
 		client: &http.Client{
 			Timeout: cfg.Timeout,
 		},
+		robotsCache: make(map[string]*robots.Policy),
 	}
 }
 
@@ -187,6 +191,11 @@ func (c *Crawler) fetch(rawURL string, depth int) result.Page {
 // IMPORTANT: jobWg.Add(1) is called BEFORE sending to the channel,
 // so the closer goroutine never sees a zero count prematurely.
 func (c *Crawler) enqueue(rawURL string, depth int) {
+	// Check robots.txt Disallow rules before admitting URL as a job
+	if !c.isAllowedByRobots(rawURL) {
+		return
+	}
+
 	// Check and update visited set — mutex protects concurrent map access
 	c.visitedMu.Lock()
 	if c.visited[rawURL] {
@@ -211,6 +220,62 @@ func (c *Crawler) enqueue(rawURL string, depth int) {
 	// cannot close jobCh until this job has been processed
 	c.jobWg.Add(1)
 	c.jobCh <- job{url: rawURL, depth: depth}
+}
+
+// isAllowedByRobots checks if the URL path is allowed by the domain's robots.txt rules.
+// It fetches and caches the robots.txt per domain thread-safely.
+func (c *Crawler) isAllowedByRobots(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	domain := strings.ToLower(u.Host)
+
+	c.robotsMu.Lock()
+	policy, exists := c.robotsCache[domain]
+	c.robotsMu.Unlock()
+
+	if !exists {
+		policy = c.fetchRobotsPolicy(u.Scheme, domain)
+		c.robotsMu.Lock()
+		if existing, ok := c.robotsCache[domain]; ok {
+			policy = existing
+		} else {
+			c.robotsCache[domain] = policy
+			if policy != nil && policy.CrawlDelay > 0 {
+				c.limiter.SetInterval(domain, policy.CrawlDelay)
+			}
+		}
+		c.robotsMu.Unlock()
+	}
+
+	if policy == nil {
+		return true
+	}
+	return policy.IsAllowed(u.Path)
+}
+
+func (c *Crawler) fetchRobotsPolicy(scheme, domain string) *robots.Policy {
+	if scheme == "" {
+		scheme = "http"
+	}
+	robotsURL := fmt.Sprintf("%s://%s/robots.txt", scheme, domain)
+	resp, err := c.client.Get(robotsURL)
+	if err != nil {
+		return &robots.Policy{}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return &robots.Policy{}
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return &robots.Policy{}
+	}
+
+	return robots.Parse(string(body), "ArachneCrawlerBot")
 }
 
 // resolveURL converts a relative link to an absolute URL based on the base page URL.

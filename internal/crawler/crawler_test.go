@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,4 +206,79 @@ func TestCrawler_ResultCh_ExceedBufferDeadlock(t *testing.T) {
 		t.Fatal("Deadlock detected: Run() did not complete within 5 seconds when results exceeded resultCh buffer")
 	}
 }
+
+func TestCrawler_RobotsCompliance(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `
+User-agent: *
+Disallow: /admin
+Disallow: /secret/
+Crawl-delay: 0.05
+`)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>
+			<a href="/allowed">Allowed</a>
+			<a href="/admin">Admin Blocked</a>
+			<a href="/secret/doc.html">Secret Blocked</a>
+		</body></html>`)
+	})
+
+	mux.HandleFunc("/allowed", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body><a href="/admin/nested">Admin Subpage</a></body></html>`)
+	})
+
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Hit disallowed path /admin")
+		fmt.Fprint(w, `<html><body>Admin</body></html>`)
+	})
+
+	mux.HandleFunc("/admin/nested", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Hit disallowed path /admin/nested")
+		fmt.Fprint(w, `<html><body>Admin Nested</body></html>`)
+	})
+
+	mux.HandleFunc("/secret/doc.html", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Hit disallowed path /secret/doc.html")
+		fmt.Fprint(w, `<html><body>Secret Doc</body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      2,
+		MaxDepth:     3,
+		RateLimit:    10 * time.Millisecond,
+		Timeout:      5 * time.Second,
+		MaxPages:     10,
+		StayOnDomain: true,
+	}
+
+	crawlerInstance := New(cfg)
+	results := crawlerInstance.Run()
+
+	for _, page := range results {
+		if page.URL == server.URL+"/admin" || page.URL == server.URL+"/admin/nested" || page.URL == server.URL+"/secret/doc.html" {
+			t.Errorf("Disallowed URL was crawled: %s", page.URL)
+		}
+	}
+
+	if len(results) != 2 {
+		t.Errorf("Expected exactly 2 allowed pages (/ and /allowed), got %d: %+v", len(results), results)
+	}
+
+	// Verify Crawl-delay was applied to the rate limiter (0.05s = 50ms)
+	u, _ := url.Parse(server.URL)
+	domain := strings.ToLower(u.Host)
+	appliedInterval := crawlerInstance.limiter.GetInterval(domain)
+	if appliedInterval != 50*time.Millisecond {
+		t.Errorf("Expected rate limiter interval for %s to be 50ms from robots.txt, got %v", domain, appliedInterval)
+	}
+}
+
 
