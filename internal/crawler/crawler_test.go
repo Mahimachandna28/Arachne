@@ -643,6 +643,100 @@ func TestCrawler_CustomUserAgentHeader(t *testing.T) {
 	}
 }
 
+func TestCrawler_ResolveURL_Canonicalization(t *testing.T) {
+	c := New(Config{StayOnDomain: true})
+
+	tests := []struct {
+		base     string
+		link     string
+		expected string
+	}{
+		// Trailing slash removed on non-root paths
+		{"http://example.com", "/about/", "http://example.com/about"},
+		{"http://example.com", "/docs/intro/", "http://example.com/docs/intro"},
+		// Bare root path preserved
+		{"http://example.com", "/", "http://example.com/"},
+		// Query parameters sorted alphabetically
+		{"http://example.com", "/search?z=3&a=1&m=2", "http://example.com/search?a=1&m=2&z=3"},
+		{"http://example.com", "/search?a=1&m=2&z=3", "http://example.com/search?a=1&m=2&z=3"},
+		// Fragment stripped
+		{"http://example.com", "/page#overview", "http://example.com/page"},
+		{"http://example.com", "/page/#overview", "http://example.com/page"},
+		// Combined trailing slash, unsorted query params, and fragment
+		{"http://example.com", "/items/?sort=desc&filter=active#results", "http://example.com/items?filter=active&sort=desc"},
+	}
+
+	for _, tc := range tests {
+		got := c.resolveURL(tc.base, tc.link)
+		if got != tc.expected {
+			t.Errorf("resolveURL(%q, %q) = %q, expected %q", tc.base, tc.link, got, tc.expected)
+		}
+	}
+}
+
+func TestCrawler_DuplicateCanonicalURLsNotCrawled(t *testing.T) {
+	var requestCount int
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		// Offer multiple equivalent links to /about and /search
+		fmt.Fprint(w, `<html><body>
+			<a href="/about/">About Slash</a>
+			<a href="/about">About NoSlash</a>
+			<a href="/about#team">About Fragment</a>
+			<a href="/search?b=2&a=1">Search 1</a>
+			<a href="/search?a=1&b=2">Search 2</a>
+		</body></html>`)
+	})
+
+	mux.HandleFunc("/about", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>About</title></head><body>About Us</body></html>`)
+	})
+
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>Search</title></head><body>Search Results</body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      2,
+		MaxDepth:     2,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     10,
+		StayOnDomain: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+
+	// We expect 3 distinct pages crawled:
+	// 1. /
+	// 2. /about
+	// 3. /search?a=1&b=2
+	if len(results) != 3 {
+		t.Errorf("Expected exactly 3 canonical pages crawled, got %d: %+v", len(results), results)
+	}
+
+	mu.Lock()
+	aboutHits := requestCount
+	mu.Unlock()
+
+	if aboutHits != 1 {
+		t.Errorf("Expected /about to be crawled exactly once due to canonicalization, got %d times", aboutHits)
+	}
+}
+
+
 
 
 

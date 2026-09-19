@@ -402,7 +402,9 @@ func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) 
 	return robots.Parse(string(body), c.config.UserAgent)
 }
 
-// resolveURL converts a relative link to an absolute URL based on the base page URL.
+// resolveURL converts a relative link to an absolute URL based on the base page URL,
+// applying canonicalization: stripping fragments, sorting query parameters, and
+// removing trailing slashes from non-root paths so equivalent URLs are not crawled twice.
 func (c *Crawler) resolveURL(base, link string) string {
 	baseURL, err := url.Parse(base)
 	if err != nil {
@@ -425,8 +427,19 @@ func (c *Crawler) resolveURL(base, link string) string {
 		return ""
 	}
 
-	// Strip fragment (#section) to avoid duplicate URLs
+	// 1. Strip URL fragments (#section)
 	resolved.Fragment = ""
+	resolved.RawFragment = ""
+
+	// 2. Sort query parameters alphabetically so key order differences don't produce duplicate crawls
+	if resolved.RawQuery != "" {
+		resolved.RawQuery = resolved.Query().Encode()
+	}
+
+	// 3. Strip trailing slash (except for bare root path "/")
+	if len(resolved.Path) > 1 && strings.HasSuffix(resolved.Path, "/") {
+		resolved.Path = strings.TrimRight(resolved.Path, "/")
+	}
 
 	return resolved.String()
 }
