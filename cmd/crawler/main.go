@@ -19,11 +19,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mahimachandna28/webcrawler/internal/crawler"
@@ -31,14 +34,15 @@ import (
 
 func main() {
 	// --- CLI Flags ---
-	workers    := flag.Int("workers", 5, "Number of concurrent worker goroutines")
-	depth      := flag.Int("depth", 2, "Maximum link-follow depth")
-	maxPages   := flag.Int("maxpages", 20, "Maximum total pages to crawl (0 = unlimited)")
-	rateLimit  := flag.Int("ratelimit", 500, "Milliseconds between requests to same domain")
-	timeout    := flag.Int("timeout", 10, "HTTP request timeout in seconds")
-	seedFlag   := flag.String("seed", "", "Comma-separated seed URLs (overrides seeds/seeds.txt)")
-	outputFile := flag.String("output", "results.json", "Output file path for crawl results")
-	sameDomain := flag.Bool("samedomain", true, "Only follow links on the same domain as seed")
+	workers     := flag.Int("workers", 5, "Number of concurrent worker goroutines")
+	depth       := flag.Int("depth", 2, "Maximum link-follow depth")
+	maxPages    := flag.Int("maxpages", 20, "Maximum total pages to crawl (0 = unlimited)")
+	rateLimit   := flag.Int("ratelimit", 500, "Milliseconds between requests to same domain")
+	timeout     := flag.Int("timeout", 10, "HTTP request timeout in seconds")
+	seedFlag    := flag.String("seed", "", "Comma-separated seed URLs (overrides seeds/seeds.txt)")
+	outputFile  := flag.String("output", "results.json", "Output file path for crawl results")
+	sameDomain  := flag.Bool("samedomain", true, "Only follow links on the same domain as seed")
+	maxDuration := flag.Duration("maxduration", 0, "Maximum crawl duration (e.g. 10s, 1m; default: 0 = unlimited)")
 	flag.Parse()
 
 	// --- Resolve seed URLs ---
@@ -61,6 +65,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --- Setup graceful shutdown and timeout via context ---
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *maxDuration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *maxDuration)
+		defer cancel()
+	}
+
 	// --- Build config and run ---
 	cfg := crawler.Config{
 		Seeds:        seeds,
@@ -72,7 +86,7 @@ func main() {
 		StayOnDomain: *sameDomain,
 	}
 
-	results := crawler.New(cfg).Run()
+	results := crawler.New(cfg).Run(ctx)
 
 	// --- Print summary to stdout ---
 	fmt.Println("\n📊 Crawl Summary:")

@@ -8,6 +8,7 @@
 package crawler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,16 +72,11 @@ func New(cfg Config) *Crawler {
 }
 
 // Run starts the crawl and returns all results when complete.
-//
-// Key design: jobWg tracks in-flight jobs, not workers.
-//   - enqueue() calls jobWg.Add(1) before sending to jobCh
-//   - worker() calls jobWg.Done() after processing each job
-//   - A closer goroutine waits for jobWg to reach zero, then closes jobCh
-//   - Workers exit their range loop when jobCh closes
-//
-// This ensures jobCh closes exactly when the queue is drained — no deadlock,
-// no need for an external "stop" signal.
-func (c *Crawler) Run() []result.Page {
+// It respects cancellation and deadlines via the provided ctx.
+func (c *Crawler) Run(ctx context.Context) []result.Page {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	fmt.Printf("🚀 Starting crawler with %d workers\n", c.config.Workers)
 	fmt.Printf("📋 Seeds: %v\n\n", c.config.Seeds)
 
@@ -102,19 +98,31 @@ func (c *Crawler) Run() []result.Page {
 		workerWg.Add(1)
 		go func(id int) {
 			defer workerWg.Done()
-			c.worker(id)
+			c.worker(ctx, id)
 		}(i)
 	}
 
 	// Seed the job channel with starting URLs
 	for _, seedURL := range c.config.Seeds {
-		c.enqueue(seedURL, 0)
+		if ctx.Err() != nil {
+			break
+		}
+		c.enqueue(ctx, seedURL, 0)
 	}
 
-	// Closer goroutine: waits until all in-flight jobs are done, then closes jobCh.
-	// This causes all workers to exit their `for job := range c.jobCh` loops cleanly.
+	// Closer goroutine: waits until all in-flight jobs are done or ctx is canceled, then closes jobCh.
+	// This causes all workers to exit their loops cleanly without deadlocking.
 	go func() {
-		c.jobWg.Wait()
+		waitDone := make(chan struct{})
+		go func() {
+			c.jobWg.Wait()
+			close(waitDone)
+		}()
+
+		select {
+		case <-waitDone:
+		case <-ctx.Done():
+		}
 		close(c.jobCh)
 	}()
 
@@ -127,42 +135,74 @@ func (c *Crawler) Run() []result.Page {
 	// Wait for the collector goroutine to finish draining any remaining pages
 	<-collectorDone
 
+	if ctx.Err() != nil {
+		fmt.Printf("\n⚠️  Crawl stopped: %v\n", ctx.Err())
+	}
 	fmt.Printf("\n✅ Crawl complete. Total pages crawled: %d\n", len(results))
 	return results
 }
 
 // worker is the function run by each goroutine in the pool.
-// It reads jobs from jobCh until the channel is closed by the closer goroutine.
-func (c *Crawler) worker(id int) {
-	for j := range c.jobCh {
-		page := c.fetch(j.url, j.depth)
-		c.resultCh <- page
+// It reads jobs from jobCh until the channel is closed or ctx is canceled.
+func (c *Crawler) worker(ctx context.Context, id int) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case j, ok := <-c.jobCh:
+			if !ok {
+				return
+			}
+			page := c.fetch(ctx, j.url, j.depth)
+			select {
+			case c.resultCh <- page:
+			case <-ctx.Done():
+				c.jobWg.Done()
+				return
+			}
 
-		// Enqueue child links before marking this job done
-		if page.Error == "" && j.depth < c.config.MaxDepth {
-			for _, link := range page.Links {
-				resolved := c.resolveURL(j.url, link)
-				if resolved != "" {
-					c.enqueue(resolved, j.depth+1)
+			// Enqueue child links before marking this job done
+			if page.Error == "" && j.depth < c.config.MaxDepth {
+				for _, link := range page.Links {
+					if ctx.Err() != nil {
+						break
+					}
+					resolved := c.resolveURL(j.url, link)
+					if resolved != "" {
+						c.enqueue(ctx, resolved, j.depth+1)
+					}
 				}
 			}
-		}
 
-		// Mark job complete — jobWg counter decrements here
-		c.jobWg.Done()
+			// Mark job complete — jobWg counter decrements here
+			c.jobWg.Done()
+		}
 	}
 }
 
-// fetch performs the HTTP GET for a single URL and returns a result.Page.
-func (c *Crawler) fetch(rawURL string, depth int) result.Page {
+// fetch performs the HTTP GET for a single URL using http.NewRequestWithContext.
+func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) result.Page {
+	if err := ctx.Err(); err != nil {
+		return result.Page{URL: rawURL, Error: err.Error()}
+	}
+
 	domain := extractDomain(rawURL)
 
 	// Rate limit per domain — this call may block to enforce the interval
 	c.limiter.Wait(domain)
 
+	if err := ctx.Err(); err != nil {
+		return result.Page{URL: rawURL, Error: err.Error()}
+	}
+
 	fmt.Printf("  [depth %d] Fetching: %s\n", depth, rawURL)
 
-	resp, err := c.client.Get(rawURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return result.Page{URL: rawURL, Error: err.Error()}
+	}
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return result.Page{URL: rawURL, Error: err.Error()}
 	}
@@ -186,13 +226,15 @@ func (c *Crawler) fetch(rawURL string, depth int) result.Page {
 	}
 }
 
-// enqueue adds a URL to the job channel if it hasn't been visited yet
-// and we haven't hit the max page limit.
-// IMPORTANT: jobWg.Add(1) is called BEFORE sending to the channel,
-// so the closer goroutine never sees a zero count prematurely.
-func (c *Crawler) enqueue(rawURL string, depth int) {
+// enqueue adds a URL to the job channel if it hasn't been visited yet,
+// is permitted by robots.txt, and we haven't hit the max page limit.
+func (c *Crawler) enqueue(ctx context.Context, rawURL string, depth int) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Check robots.txt Disallow rules before admitting URL as a job
-	if !c.isAllowedByRobots(rawURL) {
+	if !c.isAllowedByRobots(ctx, rawURL) {
 		return
 	}
 
@@ -216,15 +258,23 @@ func (c *Crawler) enqueue(rawURL string, depth int) {
 		c.pageCountMu.Unlock()
 	}
 
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Increment job counter BEFORE sending — ensures closer goroutine
 	// cannot close jobCh until this job has been processed
 	c.jobWg.Add(1)
-	c.jobCh <- job{url: rawURL, depth: depth}
+	select {
+	case c.jobCh <- job{url: rawURL, depth: depth}:
+	case <-ctx.Done():
+		c.jobWg.Done()
+	}
 }
 
 // isAllowedByRobots checks if the URL path is allowed by the domain's robots.txt rules.
 // It fetches and caches the robots.txt per domain thread-safely.
-func (c *Crawler) isAllowedByRobots(rawURL string) bool {
+func (c *Crawler) isAllowedByRobots(ctx context.Context, rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
 		return false
@@ -236,7 +286,7 @@ func (c *Crawler) isAllowedByRobots(rawURL string) bool {
 	c.robotsMu.Unlock()
 
 	if !exists {
-		policy = c.fetchRobotsPolicy(u.Scheme, domain)
+		policy = c.fetchRobotsPolicy(ctx, u.Scheme, domain)
 		c.robotsMu.Lock()
 		if existing, ok := c.robotsCache[domain]; ok {
 			policy = existing
@@ -255,20 +305,23 @@ func (c *Crawler) isAllowedByRobots(rawURL string) bool {
 	return policy.IsAllowed(u.Path)
 }
 
-func (c *Crawler) fetchRobotsPolicy(scheme, domain string) *robots.Policy {
+func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) *robots.Policy {
 	if scheme == "" {
 		scheme = "http"
 	}
 	robotsURL := fmt.Sprintf("%s://%s/robots.txt", scheme, domain)
-	resp, err := c.client.Get(robotsURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotsURL, nil)
 	if err != nil {
 		return &robots.Policy{}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	resp, err := c.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 		return &robots.Policy{}
 	}
+	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {

@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -58,7 +59,7 @@ func TestCrawler_BasicCrawl(t *testing.T) {
 		StayOnDomain: true,
 	}
 
-	results := New(cfg).Run()
+	results := New(cfg).Run(context.Background())
 
 	if len(results) == 0 {
 		t.Fatal("Expected at least one crawled page, got none")
@@ -99,7 +100,7 @@ func TestCrawler_WorkerPool_Concurrency(t *testing.T) {
 	}
 
 	start := time.Now()
-	results := New(cfg).Run()
+	results := New(cfg).Run(context.Background())
 	elapsed := time.Since(start)
 
 	if len(results) == 0 {
@@ -123,7 +124,7 @@ func TestCrawler_NoDuplicates(t *testing.T) {
 		StayOnDomain: true,
 	}
 
-	results := New(cfg).Run()
+	results := New(cfg).Run(context.Background())
 
 	// Check no URL appears twice in results
 	seen := make(map[string]int)
@@ -152,7 +153,7 @@ func TestCrawler_MaxPages(t *testing.T) {
 		StayOnDomain: true,
 	}
 
-	results := New(cfg).Run()
+	results := New(cfg).Run(context.Background())
 
 	if len(results) > maxPages {
 		t.Errorf("Expected at most %d pages, got %d", maxPages, len(results))
@@ -194,7 +195,7 @@ func TestCrawler_ResultCh_ExceedBufferDeadlock(t *testing.T) {
 
 	done := make(chan []result.Page)
 	go func() {
-		done <- New(cfg).Run()
+		done <- New(cfg).Run(context.Background())
 	}()
 
 	select {
@@ -260,7 +261,7 @@ Crawl-delay: 0.05
 	}
 
 	crawlerInstance := New(cfg)
-	results := crawlerInstance.Run()
+	results := crawlerInstance.Run(context.Background())
 
 	for _, page := range results {
 		if page.URL == server.URL+"/admin" || page.URL == server.URL+"/admin/nested" || page.URL == server.URL+"/secret/doc.html" {
@@ -278,6 +279,80 @@ Crawl-delay: 0.05
 	appliedInterval := crawlerInstance.limiter.GetInterval(domain)
 	if appliedInterval != 50*time.Millisecond {
 		t.Errorf("Expected rate limiter interval for %s to be 50ms from robots.txt, got %v", domain, appliedInterval)
+	}
+}
+
+func TestCrawler_ContextCancellation(t *testing.T) {
+	// Infinite chain of pages: each page links to the next
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<html><body><a href="%s">Next</a></body></html>`, r.URL.Path+"/next")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      3,
+		MaxDepth:     100,
+		RateLimit:    10 * time.Millisecond,
+		Timeout:      5 * time.Second,
+		MaxPages:     1000,
+		StayOnDomain: true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan []result.Page)
+	go func() {
+		done <- New(cfg).Run(ctx)
+	}()
+
+	// Wait briefly then cancel the crawl via context
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case res := <-done:
+		if len(res) >= 1000 {
+			t.Errorf("Expected crawler to cancel early, but got %d pages", len(res))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Crawler did not stop within 2s after context cancellation — goroutine leak or deadlock")
+	}
+}
+
+func TestCrawler_ContextTimeout(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		fmt.Fprintf(w, `<html><body><a href="%s">Next</a></body></html>`, r.URL.Path+"/next")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      2,
+		MaxDepth:     100,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1000,
+		StayOnDomain: true,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	res := New(cfg).Run(ctx)
+	elapsed := time.Since(start)
+
+	if len(res) >= 1000 {
+		t.Errorf("Expected crawl to be limited by timeout, but crawled all %d pages", len(res))
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Crawl took too long to terminate on timeout: %v", elapsed)
 	}
 }
 
