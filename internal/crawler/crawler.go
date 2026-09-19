@@ -23,6 +23,9 @@ import (
 	"github.com/mahimachandna28/webcrawler/internal/robots"
 )
 
+// DefaultUserAgent is the default User-Agent header identifying the crawler and repository.
+const DefaultUserAgent = "ArachneCrawlerBot/1.0 (+https://github.com/mahimachandna28/Arachne)"
+
 // Config holds the configuration for a crawl run.
 type Config struct {
 	Seeds        []string      // Starting URLs
@@ -33,6 +36,7 @@ type Config struct {
 	MaxPages     int           // Maximum total pages to crawl (0 = unlimited)
 	StayOnDomain bool          // If true, only follow links on the same domain as seed
 	Retries      int           // Maximum retry attempts on transient failure (network error or 5xx)
+	UserAgent    string        // User-Agent request header (defaults to DefaultUserAgent)
 }
 
 // job represents a single crawl task sent through the job channel.
@@ -59,6 +63,9 @@ type Crawler struct {
 
 // New creates a new Crawler with the given configuration.
 func New(cfg Config) *Crawler {
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = DefaultUserAgent
+	}
 	return &Crawler{
 		config:      cfg,
 		jobCh:       make(chan job, cfg.Workers*20), // Buffered to reduce blocking
@@ -225,6 +232,7 @@ func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) result.Pa
 		if err != nil {
 			return result.Page{URL: rawURL, Error: err.Error()}
 		}
+		req.Header.Set("User-Agent", c.config.UserAgent)
 
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -375,6 +383,8 @@ func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) 
 	if err != nil {
 		return &robots.Policy{}
 	}
+	req.Header.Set("User-Agent", c.config.UserAgent)
+
 	resp, err := c.client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil && resp.Body != nil {
@@ -389,7 +399,7 @@ func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) 
 		return &robots.Policy{}
 	}
 
-	return robots.Parse(string(body), "ArachneCrawlerBot")
+	return robots.Parse(string(body), c.config.UserAgent)
 }
 
 // resolveURL converts a relative link to an absolute URL based on the base page URL.

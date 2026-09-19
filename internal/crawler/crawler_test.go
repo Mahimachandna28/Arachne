@@ -561,6 +561,89 @@ func TestCrawler_SizeGuard(t *testing.T) {
 	}
 }
 
+func TestCrawler_UserAgentHeader(t *testing.T) {
+	var receivedUA string
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedUA = r.Header.Get("User-Agent")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>UA Test</title></head><body>Hello</body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      1,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1,
+		StayOnDomain: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 page, got %d", len(results))
+	}
+
+	mu.Lock()
+	ua := receivedUA
+	mu.Unlock()
+
+	if ua != DefaultUserAgent {
+		t.Errorf("Expected User-Agent %q, got %q", DefaultUserAgent, ua)
+	}
+}
+
+func TestCrawler_CustomUserAgentHeader(t *testing.T) {
+	const customUA = "CustomBot/2.0 (+https://example.com/bot)"
+	var receivedUA string
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedUA = r.Header.Get("User-Agent")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>Custom UA Test</title></head><body>Hello</body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/"},
+		Workers:      1,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1,
+		StayOnDomain: true,
+		UserAgent:    customUA,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 page, got %d", len(results))
+	}
+
+	mu.Lock()
+	ua := receivedUA
+	mu.Unlock()
+
+	if ua != customUA {
+		t.Errorf("Expected User-Agent %q, got %q", customUA, ua)
+	}
+}
+
+
 
 
 

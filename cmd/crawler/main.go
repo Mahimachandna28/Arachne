@@ -44,6 +44,7 @@ func main() {
 	sameDomain  := flag.Bool("samedomain", true, "Only follow links on the same domain as seed")
 	maxDuration := flag.Duration("maxduration", 0, "Maximum crawl duration (e.g. 10s, 1m; default: 0 = unlimited)")
 	retries     := flag.Int("retries", 2, "Maximum retry attempts on transient errors (network error or 5xx)")
+	userAgent   := flag.String("useragent", crawler.DefaultUserAgent, "User-Agent header identifying the crawler")
 	flag.Parse()
 
 	// --- Resolve seed URLs ---
@@ -86,6 +87,7 @@ func main() {
 		MaxPages:     *maxPages,
 		StayOnDomain: *sameDomain,
 		Retries:      *retries,
+		UserAgent:    *userAgent,
 	}
 
 	results := crawler.New(cfg).Run(ctx)
