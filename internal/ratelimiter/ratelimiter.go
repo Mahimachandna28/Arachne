@@ -49,24 +49,32 @@ func (r *RateLimiter) GetInterval(domain string) time.Duration {
 // to the given domain, enforcing the rate limit.
 func (r *RateLimiter) Wait(domain string) {
 	r.mu.Lock()
-	last, exists := r.limits[domain]
-	interval := r.interval
-	if d, ok := r.customInterval[domain]; ok {
-		interval = d
-	}
-	now := time.Now()
+	defer r.mu.Unlock()
 
-	if exists {
-		next := last.Add(interval)
-		if now.Before(next) {
-			// Need to wait — release lock while sleeping to avoid blocking others
-			waitDuration := next.Sub(now)
-			r.mu.Unlock()
-			time.Sleep(waitDuration)
-			r.mu.Lock()
+	for {
+		last, exists := r.limits[domain]
+		interval := r.interval
+		if d, ok := r.customInterval[domain]; ok {
+			interval = d
 		}
-	}
 
-	r.limits[domain] = time.Now()
-	r.mu.Unlock()
+		now := time.Now()
+		if !exists {
+			r.limits[domain] = now
+			return
+		}
+
+		next := last.Add(interval)
+		if !now.Before(next) {
+			r.limits[domain] = now
+			return
+		}
+
+		// Interval not yet elapsed — release lock while sleeping,
+		// then re-check after re-acquiring the lock in the next iteration.
+		waitDuration := next.Sub(now)
+		r.mu.Unlock()
+		time.Sleep(waitDuration)
+		r.mu.Lock()
+	}
 }

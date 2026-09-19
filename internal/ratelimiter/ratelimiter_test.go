@@ -1,6 +1,7 @@
 package ratelimiter
 
 import (
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -49,4 +50,45 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait() // Should complete without race conditions (run with -race to verify)
+}
+
+func TestRateLimiter_ConcurrentIntervalGuarantee(t *testing.T) {
+	// Verifies that under concurrent calls to the same domain,
+	// each goroutine's exit is spaced by at least the interval.
+	interval := 40 * time.Millisecond
+	rl := New(interval)
+
+	const n = 5
+	timestamps := make([]time.Time, 0, n)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rl.Wait("same-domain.com")
+			mu.Lock()
+			timestamps = append(timestamps, time.Now())
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if len(timestamps) != n {
+		t.Fatalf("Expected %d timestamps, got %d", n, len(timestamps))
+	}
+
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i].Before(timestamps[j])
+	})
+
+	tolerance := 5 * time.Millisecond
+	for i := 1; i < len(timestamps); i++ {
+		diff := timestamps[i].Sub(timestamps[i-1])
+		if diff < interval-tolerance {
+			t.Errorf("Interval between requests %d and %d was %v, expected at least %v", i-1, i, diff, interval-tolerance)
+		}
+	}
 }
