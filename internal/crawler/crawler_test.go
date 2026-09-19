@@ -463,5 +463,104 @@ func TestCrawler_RetriesExhausted(t *testing.T) {
 	}
 }
 
+func TestCrawler_ContentTypeGuard(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/image.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}) // PNG magic bytes
+	})
+
+	mux.HandleFunc("/data.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"title": "Not an HTML page", "links": ["/hidden"]}`)
+	})
+
+	mux.HandleFunc("/valid.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head><title>Valid</title></head><body><a href="/image.png">Image</a><a href="/data.json">JSON</a></body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/valid.html"},
+		Workers:      2,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     10,
+		StayOnDomain: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 results, got %d: %+v", len(results), results)
+	}
+
+	for _, page := range results {
+		switch page.URL {
+		case server.URL + "/valid.html":
+			if page.Title != "Valid" {
+				t.Errorf("Expected title 'Valid', got %q", page.Title)
+			}
+			if page.Error != "" {
+				t.Errorf("Unexpected error for valid page: %s", page.Error)
+			}
+		case server.URL + "/image.png":
+			if page.Error == "" || !strings.Contains(page.Error, "skipped non-HTML content type") {
+				t.Errorf("Expected non-HTML content type error for image, got %q", page.Error)
+			}
+			if len(page.Links) != 0 {
+				t.Errorf("Expected 0 links from binary image, got %d", len(page.Links))
+			}
+		case server.URL + "/data.json":
+			if page.Error == "" || !strings.Contains(page.Error, "skipped non-HTML content type") {
+				t.Errorf("Expected non-HTML content type error for JSON, got %q", page.Error)
+			}
+			if len(page.Links) != 0 {
+				t.Errorf("Expected 0 links from JSON, got %d", len(page.Links))
+			}
+		}
+	}
+}
+
+func TestCrawler_SizeGuard(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/huge.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Length", "2000000") // 2MB declared
+		w.WriteHeader(http.StatusOK)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/huge.html"},
+		Workers:      1,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1,
+		StayOnDomain: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+
+	page := results[0]
+	if page.Error == "" || !strings.Contains(page.Error, "exceeding max size") {
+		t.Errorf("Expected size guard error, got %q", page.Error)
+	}
+}
+
+
 
 

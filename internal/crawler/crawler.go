@@ -243,8 +243,30 @@ func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) result.Pa
 			continue // transient server error -> retry
 		}
 
-		// Non-5xx response received: read body and parse
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		// Content-Type guard: ensure response is HTML before attempting extraction
+		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+		if !strings.HasPrefix(strings.ToLower(contentType), "text/html") {
+			resp.Body.Close()
+			return result.Page{
+				URL:        rawURL,
+				StatusCode: resp.StatusCode,
+				Error:      fmt.Sprintf("skipped non-HTML content type: %q", contentType),
+			}
+		}
+
+		// Size guard: check Content-Length header to avoid downloading huge files
+		const maxBodyBytes = 1 << 20 // 1MB limit
+		if resp.ContentLength > maxBodyBytes {
+			resp.Body.Close()
+			return result.Page{
+				URL:        rawURL,
+				StatusCode: resp.StatusCode,
+				Error:      fmt.Sprintf("skipped response exceeding max size: %d bytes (limit %d bytes)", resp.ContentLength, maxBodyBytes),
+			}
+		}
+
+		// Read up to 1MB of body
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		resp.Body.Close()
 		if err != nil {
 			return result.Page{URL: rawURL, StatusCode: resp.StatusCode, Error: err.Error()}
