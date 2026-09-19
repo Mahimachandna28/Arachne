@@ -2,13 +2,21 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 )
 
 func main() {
-	const port = ":8080"
+	portFlag := flag.String("port", "8080", "Port to serve dashboard on")
+	flag.Parse()
+
+	port := *portFlag
+	if !strings.HasPrefix(port, ":") {
+		port = ":" + port
+	}
 
 	// Serve static files from the repository root (index.html, results.json)
 	fs := http.FileServer(http.Dir("."))
