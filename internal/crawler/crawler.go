@@ -80,6 +80,18 @@ func (c *Crawler) Run() []result.Page {
 	fmt.Printf("🚀 Starting crawler with %d workers\n", c.config.Workers)
 	fmt.Printf("📋 Seeds: %v\n\n", c.config.Seeds)
 
+	// Drain resultCh concurrently with a dedicated collector goroutine.
+	// This prevents workers from blocking on resultCh <- page when the total
+	// crawled pages exceed the bounded buffer size (Workers * 20).
+	var results []result.Page
+	collectorDone := make(chan struct{})
+	go func() {
+		for page := range c.resultCh {
+			results = append(results, page)
+		}
+		close(collectorDone)
+	}()
+
 	// Launch worker pool — each worker is a goroutine
 	var workerWg sync.WaitGroup
 	for i := 1; i <= c.config.Workers; i++ {
@@ -102,15 +114,14 @@ func (c *Crawler) Run() []result.Page {
 		close(c.jobCh)
 	}()
 
-	// Wait for all workers to finish, then signal result collector
+	// Wait for all workers to finish processing and exiting
 	workerWg.Wait()
+
+	// All workers have finished sending results; closing resultCh allows the collector to terminate
 	close(c.resultCh)
 
-	// Collect all results
-	var results []result.Page
-	for page := range c.resultCh {
-		results = append(results, page)
-	}
+	// Wait for the collector goroutine to finish draining any remaining pages
+	<-collectorDone
 
 	fmt.Printf("\n✅ Crawl complete. Total pages crawled: %d\n", len(results))
 	return results

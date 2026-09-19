@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/mahimachandna28/webcrawler/internal/result"
 )
 
 // mockServer creates a local test HTTP server with predefined pages.
@@ -154,3 +156,52 @@ func TestCrawler_MaxPages(t *testing.T) {
 		t.Errorf("Expected at most %d pages, got %d", maxPages, len(results))
 	}
 }
+
+func TestCrawler_ResultCh_ExceedBufferDeadlock(t *testing.T) {
+	// Buffer size for resultCh is Workers * 20.
+	// With Workers = 2, buffer size is 40.
+	// We crawl a chain of 45 pages: page 0 -> page 1 -> ... -> page 44.
+	// At any moment jobCh holds at most 1 job, but resultCh receives 45 pages.
+	// If resultCh were not drained concurrently while workers run, the 41st send
+	// to resultCh would block the worker while Run() waits at workerWg.Wait(),
+	// resulting in a permanent deadlock.
+	const totalPages = 45
+	mux := http.NewServeMux()
+	for i := 0; i < totalPages; i++ {
+		curr := i
+		mux.HandleFunc(fmt.Sprintf("/p%d", curr), func(w http.ResponseWriter, r *http.Request) {
+			var nextLink string
+			if curr+1 < totalPages {
+				nextLink = fmt.Sprintf(`<a href="/p%d">Next</a>`, curr+1)
+			}
+			fmt.Fprintf(w, "<html><head><title>Page %d</title></head><body>%s</body></html>", curr, nextLink)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/p0"},
+		Workers:      2, // resultCh buffer is 2*20 = 40
+		MaxDepth:     totalPages + 1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     totalPages, // 45 > 40 (exceeds resultCh buffer)
+		StayOnDomain: true,
+	}
+
+	done := make(chan []result.Page)
+	go func() {
+		done <- New(cfg).Run()
+	}()
+
+	select {
+	case res := <-done:
+		if len(res) != totalPages {
+			t.Fatalf("Expected %d pages (exceeding buffer 40), got %d", totalPages, len(res))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Deadlock detected: Run() did not complete within 5 seconds when results exceeded resultCh buffer")
+	}
+}
+
