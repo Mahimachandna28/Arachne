@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,5 +356,112 @@ func TestCrawler_ContextTimeout(t *testing.T) {
 		t.Errorf("Crawl took too long to terminate on timeout: %v", elapsed)
 	}
 }
+
+func TestCrawler_RetriesWithBackoff(t *testing.T) {
+	var attempts int
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/flaky", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		curr := attempts
+		mu.Unlock()
+
+		if curr < 3 {
+			// Fail first 2 attempts with 500 Internal Server Error
+			http.Error(w, "Temporary Server Error", http.StatusInternalServerError)
+			return
+		}
+		// Succeed on 3rd attempt
+		fmt.Fprint(w, `<html><head><title>Recovered Page</title></head><body>Success</body></html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/flaky"},
+		Workers:      1,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1,
+		StayOnDomain: true,
+		Retries:      2, // Should retry twice and succeed on 3rd attempt
+	}
+
+	results := New(cfg).Run(context.Background())
+
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result page, got %d", len(results))
+	}
+
+	page := results[0]
+	if page.StatusCode != 200 {
+		t.Errorf("Expected status 200 after retries, got %d (error: %s)", page.StatusCode, page.Error)
+	}
+	if page.Title != "Recovered Page" {
+		t.Errorf("Expected title 'Recovered Page', got %q", page.Title)
+	}
+
+	mu.Lock()
+	totalAttempts := attempts
+	mu.Unlock()
+
+	if totalAttempts != 3 {
+		t.Errorf("Expected exactly 3 attempts (1 initial + 2 retries), got %d", totalAttempts)
+	}
+}
+
+func TestCrawler_RetriesExhausted(t *testing.T) {
+	var attempts int
+	var mu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/broken", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		http.Error(w, "Persistent Error", http.StatusBadGateway) // 502
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:        []string{server.URL + "/broken"},
+		Workers:      1,
+		MaxDepth:     1,
+		RateLimit:    0,
+		Timeout:      5 * time.Second,
+		MaxPages:     1,
+		StayOnDomain: true,
+		Retries:      2,
+	}
+
+	results := New(cfg).Run(context.Background())
+
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result page, got %d", len(results))
+	}
+
+	page := results[0]
+	if page.StatusCode != 502 {
+		t.Errorf("Expected status 502, got %d", page.StatusCode)
+	}
+	if page.Error == "" {
+		t.Error("Expected page to be marked with an error after exhausted retries")
+	}
+
+	mu.Lock()
+	totalAttempts := attempts
+	mu.Unlock()
+
+	if totalAttempts != 3 { // 1 initial + 2 retries
+		t.Errorf("Expected 3 attempts before failure, got %d", totalAttempts)
+	}
+}
+
 
 

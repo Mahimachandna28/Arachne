@@ -32,6 +32,7 @@ type Config struct {
 	Timeout      time.Duration // HTTP request timeout
 	MaxPages     int           // Maximum total pages to crawl (0 = unlimited)
 	StayOnDomain bool          // If true, only follow links on the same domain as seed
+	Retries      int           // Maximum retry attempts on transient failure (network error or 5xx)
 }
 
 // job represents a single crawl task sent through the job channel.
@@ -180,50 +181,88 @@ func (c *Crawler) worker(ctx context.Context, id int) {
 	}
 }
 
-// fetch performs the HTTP GET for a single URL using http.NewRequestWithContext.
+// fetch performs the HTTP GET for a single URL using http.NewRequestWithContext,
+// retrying transient errors (network failures and 5xx responses) with exponential backoff.
 func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) result.Page {
-	if err := ctx.Err(); err != nil {
-		return result.Page{URL: rawURL, Error: err.Error()}
+	maxAttempts := c.config.Retries + 1
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
 
-	domain := extractDomain(rawURL)
+	var lastPage result.Page
 
-	// Rate limit per domain — this call may block to enforce the interval
-	c.limiter.Wait(domain)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 50ms * 2^(attempt-1)
+			backoff := time.Duration(50*(1<<(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return result.Page{URL: rawURL, Error: ctx.Err().Error()}
+			case <-time.After(backoff):
+			}
+		}
 
-	if err := ctx.Err(); err != nil {
-		return result.Page{URL: rawURL, Error: err.Error()}
+		if err := ctx.Err(); err != nil {
+			return result.Page{URL: rawURL, Error: err.Error()}
+		}
+
+		domain := extractDomain(rawURL)
+
+		// Rate limit per domain — this call may block to enforce the interval
+		c.limiter.Wait(domain)
+
+		if err := ctx.Err(); err != nil {
+			return result.Page{URL: rawURL, Error: err.Error()}
+		}
+
+		if attempt == 0 {
+			fmt.Printf("  [depth %d] Fetching: %s\n", depth, rawURL)
+		} else {
+			fmt.Printf("  [depth %d] Retrying (%d/%d): %s\n", depth, attempt, c.config.Retries, rawURL)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return result.Page{URL: rawURL, Error: err.Error()}
+		}
+
+		resp, err := c.client.Do(req)
+		if err != nil {
+			lastPage = result.Page{URL: rawURL, Error: err.Error()}
+			continue // transient network error -> retry
+		}
+
+		// Check for transient 5xx server error
+		if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+			resp.Body.Close()
+			lastPage = result.Page{
+				URL:        rawURL,
+				StatusCode: resp.StatusCode,
+				Error:      fmt.Sprintf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode)),
+			}
+			continue // transient server error -> retry
+		}
+
+		// Non-5xx response received: read body and parse
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err != nil {
+			return result.Page{URL: rawURL, StatusCode: resp.StatusCode, Error: err.Error()}
+		}
+
+		html := string(body)
+		title := parser.ExtractTitle(html)
+		links := parser.ExtractLinks(html)
+
+		return result.Page{
+			URL:        rawURL,
+			Title:      title,
+			Links:      links,
+			StatusCode: resp.StatusCode,
+		}
 	}
 
-	fmt.Printf("  [depth %d] Fetching: %s\n", depth, rawURL)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return result.Page{URL: rawURL, Error: err.Error()}
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return result.Page{URL: rawURL, Error: err.Error()}
-	}
-	defer resp.Body.Close()
-
-	// Read only up to 1MB of body to avoid huge pages
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return result.Page{URL: rawURL, StatusCode: resp.StatusCode, Error: err.Error()}
-	}
-
-	html := string(body)
-	title := parser.ExtractTitle(html)
-	links := parser.ExtractLinks(html)
-
-	return result.Page{
-		URL:        rawURL,
-		Title:      title,
-		Links:      links,
-		StatusCode: resp.StatusCode,
-	}
+	return lastPage
 }
 
 // enqueue adds a URL to the job channel if it hasn't been visited yet,
