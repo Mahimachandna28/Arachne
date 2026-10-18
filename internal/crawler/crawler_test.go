@@ -57,7 +57,8 @@ func TestCrawler_BasicCrawl(t *testing.T) {
 		RateLimit:    10 * time.Millisecond,
 		Timeout:      5 * time.Second,
 		MaxPages:     10,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -97,7 +98,8 @@ func TestCrawler_WorkerPool_Concurrency(t *testing.T) {
 		RateLimit:    0, // No rate limiting for speed test
 		Timeout:      5 * time.Second,
 		MaxPages:     10,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	start := time.Now()
@@ -122,7 +124,8 @@ func TestCrawler_NoDuplicates(t *testing.T) {
 		RateLimit:    10 * time.Millisecond,
 		Timeout:      5 * time.Second,
 		MaxPages:     50,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -151,7 +154,8 @@ func TestCrawler_MaxPages(t *testing.T) {
 		RateLimit:    10 * time.Millisecond,
 		Timeout:      5 * time.Second,
 		MaxPages:     maxPages,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -191,7 +195,8 @@ func TestCrawler_ResultCh_ExceedBufferDeadlock(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     totalPages, // 45 > 40 (exceeds resultCh buffer)
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	done := make(chan []result.Page)
@@ -258,7 +263,8 @@ Crawl-delay: 0.05
 		RateLimit:    10 * time.Millisecond,
 		Timeout:      5 * time.Second,
 		MaxPages:     10,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	crawlerInstance := New(cfg)
@@ -299,7 +305,8 @@ func TestCrawler_ContextCancellation(t *testing.T) {
 		RateLimit:    10 * time.Millisecond,
 		Timeout:      5 * time.Second,
 		MaxPages:     1000,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -339,7 +346,8 @@ func TestCrawler_ContextTimeout(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1000,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
@@ -387,7 +395,8 @@ func TestCrawler_RetriesWithBackoff(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 		Retries:      2, // Should retry twice and succeed on 3rd attempt
 	}
 
@@ -436,7 +445,8 @@ func TestCrawler_RetriesExhausted(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 		Retries:      2,
 	}
 
@@ -491,7 +501,8 @@ func TestCrawler_ContentTypeGuard(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     10,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -546,7 +557,8 @@ func TestCrawler_SizeGuard(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -584,7 +596,8 @@ func TestCrawler_UserAgentHeader(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -625,7 +638,8 @@ func TestCrawler_CustomUserAgentHeader(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     1,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 		UserAgent:    customUA,
 	}
 
@@ -714,7 +728,8 @@ func TestCrawler_DuplicateCanonicalURLsNotCrawled(t *testing.T) {
 		RateLimit:    0,
 		Timeout:      5 * time.Second,
 		MaxPages:     10,
-		StayOnDomain: true,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -736,8 +751,31 @@ func TestCrawler_DuplicateCanonicalURLsNotCrawled(t *testing.T) {
 	}
 }
 
+func TestCrawler_SSRFProtection(t *testing.T) {
+	server := mockServer()
+	defer server.Close()
 
+	// Default Config has AllowPrivateIPs: false
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
+		StayOnDomain:    true,
+		AllowPrivateIPs: false, // Default: SSRF guard active
+	}
 
+	results := New(cfg).Run(context.Background())
+	if len(results) == 0 {
+		t.Fatal("Expected at least one result recording SSRF failure")
+	}
 
-
-
+	if results[0].Error == "" {
+		t.Fatalf("Expected SSRF error when crawling loopback address, got successful response: %+v", results[0])
+	}
+	if !strings.Contains(results[0].Error, "blocked by SSRF policy") {
+		t.Errorf("Expected error to mention 'blocked by SSRF policy', got: %q", results[0].Error)
+	}
+}

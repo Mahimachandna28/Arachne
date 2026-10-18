@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mahimachandna28/webcrawler/internal/netguard"
 	"github.com/mahimachandna28/webcrawler/internal/parser"
 	"github.com/mahimachandna28/webcrawler/internal/ratelimiter"
 	"github.com/mahimachandna28/webcrawler/internal/result"
@@ -28,15 +29,16 @@ const DefaultUserAgent = "ArachneCrawlerBot/1.0 (+https://github.com/mahimachand
 
 // Config holds the configuration for a crawl run.
 type Config struct {
-	Seeds        []string      // Starting URLs
-	Workers      int           // Number of concurrent worker goroutines
-	MaxDepth     int           // Maximum link depth to follow
-	RateLimit    time.Duration // Minimum time between requests to the same domain
-	Timeout      time.Duration // HTTP request timeout
-	MaxPages     int           // Maximum total pages to crawl (0 = unlimited)
-	StayOnDomain bool          // If true, only follow links on the same domain as seed
-	Retries      int           // Maximum retry attempts on transient failure (network error or 5xx)
-	UserAgent    string        // User-Agent request header (defaults to DefaultUserAgent)
+	Seeds           []string      // Starting URLs
+	Workers         int           // Number of concurrent worker goroutines
+	MaxDepth        int           // Maximum link depth to follow
+	RateLimit       time.Duration // Minimum time between requests to the same domain
+	Timeout         time.Duration // HTTP request timeout
+	MaxPages        int           // Maximum total pages to crawl (0 = unlimited)
+	StayOnDomain    bool          // If true, only follow links on the same domain as seed
+	Retries         int           // Maximum retry attempts on transient failure (network error or 5xx)
+	UserAgent       string        // User-Agent request header (defaults to DefaultUserAgent)
+	AllowPrivateIPs bool          // If true, allows connections to private/loopback IP addresses (disables SSRF guard, e.g. for testing)
 }
 
 // job represents a single crawl task sent through the job channel.
@@ -66,6 +68,16 @@ func New(cfg Config) *Crawler {
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = DefaultUserAgent
 	}
+
+	guard := netguard.New(netguard.Config{
+		AllowPrivate: cfg.AllowPrivateIPs,
+		DialTimeout:  cfg.Timeout,
+	})
+	transport := &http.Transport{
+		Proxy:       http.ProxyFromEnvironment,
+		DialContext: guard.DialContext,
+	}
+
 	return &Crawler{
 		config:      cfg,
 		jobCh:       make(chan job, cfg.Workers*20), // Buffered to reduce blocking
@@ -73,7 +85,8 @@ func New(cfg Config) *Crawler {
 		visited:     make(map[string]bool),
 		limiter:     ratelimiter.New(cfg.RateLimit),
 		client: &http.Client{
-			Timeout: cfg.Timeout,
+			Timeout:   cfg.Timeout,
+			Transport: transport,
 		},
 		robotsCache: make(map[string]*robots.Policy),
 	}
