@@ -1,9 +1,11 @@
-// Package robots implements a robots.txt parser and rule matcher.
+// Package robots implements a robots.txt parser and rule matcher supporting
+// RFC 9309 directives, wildcards (*, $), and Sitemap definitions.
 package robots
 
 import (
 	"bufio"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ type Policy struct {
 	Disallowed []string
 	Allowed    []string
 	CrawlDelay time.Duration
+	Sitemaps   []string
 }
 
 // Parse parses the raw text of a robots.txt file and returns a Policy matching
@@ -61,6 +64,10 @@ func Parse(content string, userAgent string) *Policy {
 					policy.CrawlDelay = time.Duration(secs * float64(time.Second))
 				}
 			}
+		case "sitemap":
+			if val != "" {
+				policy.Sitemaps = append(policy.Sitemaps, val)
+			}
 		}
 	}
 
@@ -80,7 +87,7 @@ func agentMatches(agents []string, target string) bool {
 }
 
 // IsAllowed reports whether rawURLOrPath is permitted to be crawled under this policy.
-// Allowed rules take precedence over Disallowed rules if the matched prefix is equal or longer.
+// Follows RFC 9309 specificity rules and supports wildcards (* and $).
 func (p *Policy) IsAllowed(rawURLOrPath string) bool {
 	if p == nil {
 		return true
@@ -97,9 +104,9 @@ func (p *Policy) IsAllowed(rawURLOrPath string) bool {
 	disallowed := false
 	maxDisallowLen := 0
 	for _, d := range p.Disallowed {
-		if strings.HasPrefix(path, d) && len(d) > maxDisallowLen {
+		if ok, length := matchPattern(d, path); ok && length > maxDisallowLen {
 			disallowed = true
-			maxDisallowLen = len(d)
+			maxDisallowLen = length
 		}
 	}
 
@@ -109,10 +116,54 @@ func (p *Policy) IsAllowed(rawURLOrPath string) bool {
 
 	// An explicit Allow directive that is as specific or more specific overrides Disallow
 	for _, a := range p.Allowed {
-		if strings.HasPrefix(path, a) && len(a) >= maxDisallowLen {
+		if ok, length := matchPattern(a, path); ok && length >= maxDisallowLen {
 			return true
 		}
 	}
 
 	return false
+}
+
+// matchPattern matches a robots.txt rule pattern against a URL path.
+// Supports '*' (0 or more arbitrary characters) and '$' (end-of-path anchor).
+func matchPattern(pattern, path string) (bool, int) {
+	if pattern == "" {
+		return false, 0
+	}
+
+	// Fast path: standard prefix match without wildcards or end-of-path anchor
+	if !strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, "$") {
+		if strings.HasPrefix(path, pattern) {
+			return true, len(pattern)
+		}
+		return false, 0
+	}
+
+	// Build regular expression for pattern with wildcards
+	anchorEnd := strings.HasSuffix(pattern, "$")
+	cleanPat := pattern
+	if anchorEnd {
+		cleanPat = cleanPat[:len(cleanPat)-1]
+	}
+
+	parts := strings.Split(cleanPat, "*")
+	var regexParts []string
+	for _, p := range parts {
+		regexParts = append(regexParts, regexp.QuoteMeta(p))
+	}
+
+	regexStr := "^" + strings.Join(regexParts, ".*")
+	if anchorEnd {
+		regexStr += "$"
+	}
+
+	re, err := regexp.Compile(regexStr)
+	if err != nil {
+		return false, 0
+	}
+
+	if re.MatchString(path) {
+		return true, len(pattern)
+	}
+	return false, 0
 }

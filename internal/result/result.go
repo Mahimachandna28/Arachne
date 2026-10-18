@@ -4,9 +4,11 @@ package result
 
 // Page holds the crawled data extracted from a single URL.
 type Page struct {
-	URL        string   // The URL that was crawled
-	Title      string   // The <title> tag content of the page
-	Links      []string // All hyperlinks found on the page
-	StatusCode int      // HTTP response status code
-	Error      string   // Non-empty if crawling failed
+	URL          string   `json:"url"`                     // The URL that was crawled
+	Title        string   `json:"title,omitempty"`         // The <title> tag content of the page
+	CanonicalURL string   `json:"canonical_url,omitempty"` // The author-declared canonical link if specified
+	Description  string   `json:"description,omitempty"`   // The meta description if found
+	Links        []string `json:"links,omitempty"`         // All hyperlinks found on the page
+	StatusCode   int      `json:"status_code"`             // HTTP response status code
+	Error        string   `json:"error,omitempty"`         // Non-empty if crawling failed
 }

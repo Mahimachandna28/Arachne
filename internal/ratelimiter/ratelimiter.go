@@ -3,6 +3,7 @@
 package ratelimiter
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -11,9 +12,9 @@ import (
 // It uses a mutex to safely handle concurrent access from multiple goroutines.
 type RateLimiter struct {
 	mu             sync.Mutex
-	limits         map[string]time.Time          // last request time per domain
-	customInterval map[string]time.Duration      // per-domain intervals (e.g. from robots.txt Crawl-delay)
-	interval       time.Duration                 // default minimum time between requests to same domain
+	limits         map[string]time.Time     // last request time per domain
+	customInterval map[string]time.Duration // per-domain intervals (e.g. from robots.txt Crawl-delay or Retry-After)
+	interval       time.Duration            // default minimum time between requests to same domain
 }
 
 // New creates a new RateLimiter with the given interval between requests.
@@ -45,13 +46,21 @@ func (r *RateLimiter) GetInterval(domain string) time.Duration {
 	return r.interval
 }
 
-// Wait blocks the calling goroutine until it is safe to make a request
-// to the given domain, enforcing the rate limit.
-func (r *RateLimiter) Wait(domain string) {
+// Wait blocks until it is safe to make a request to the given domain according
+// to rate limit rules, or until the provided context is canceled.
+func (r *RateLimiter) Wait(ctx context.Context, domain string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		last, exists := r.limits[domain]
 		interval := r.interval
 		if d, ok := r.customInterval[domain]; ok {
@@ -61,20 +70,27 @@ func (r *RateLimiter) Wait(domain string) {
 		now := time.Now()
 		if !exists {
 			r.limits[domain] = now
-			return
+			return nil
 		}
 
 		next := last.Add(interval)
 		if !now.Before(next) {
 			r.limits[domain] = now
-			return
+			return nil
 		}
 
 		// Interval not yet elapsed — release lock while sleeping,
-		// then re-check after re-acquiring the lock in the next iteration.
+		// cancellable via ctx.Done()
 		waitDuration := next.Sub(now)
 		r.mu.Unlock()
-		time.Sleep(waitDuration)
+
+		select {
+		case <-ctx.Done():
+			r.mu.Lock()
+			return ctx.Err()
+		case <-time.After(waitDuration):
+		}
+
 		r.mu.Lock()
 	}
 }

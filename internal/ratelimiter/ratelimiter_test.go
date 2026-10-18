@@ -1,6 +1,8 @@
 package ratelimiter
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -12,8 +14,8 @@ func TestRateLimiter_SingleDomain(t *testing.T) {
 	rl := New(interval)
 
 	start := time.Now()
-	rl.Wait("example.com")
-	rl.Wait("example.com") // Second call should be delayed
+	_ = rl.Wait(context.Background(), "example.com")
+	_ = rl.Wait(context.Background(), "example.com") // Second call should be delayed
 	elapsed := time.Since(start)
 
 	if elapsed < interval {
@@ -26,8 +28,8 @@ func TestRateLimiter_DifferentDomains(t *testing.T) {
 	rl := New(interval)
 
 	start := time.Now()
-	rl.Wait("example.com")
-	rl.Wait("other.com") // Different domain — should NOT be delayed
+	_ = rl.Wait(context.Background(), "example.com")
+	_ = rl.Wait(context.Background(), "other.com") // Different domain — should NOT be delayed
 	elapsed := time.Since(start)
 
 	// Should complete well within the interval since domains are independent
@@ -37,7 +39,6 @@ func TestRateLimiter_DifferentDomains(t *testing.T) {
 }
 
 func TestRateLimiter_ConcurrentAccess(t *testing.T) {
-	// Tests that the mutex prevents race conditions under concurrent access
 	rl := New(10 * time.Millisecond)
 	var wg sync.WaitGroup
 
@@ -45,16 +46,14 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rl.Wait("concurrent.com")
+			_ = rl.Wait(context.Background(), "concurrent.com")
 		}()
 	}
 
-	wg.Wait() // Should complete without race conditions (run with -race to verify)
+	wg.Wait()
 }
 
 func TestRateLimiter_ConcurrentIntervalGuarantee(t *testing.T) {
-	// Verifies that under concurrent calls to the same domain,
-	// each goroutine's exit is spaced by at least the interval.
 	interval := 40 * time.Millisecond
 	rl := New(interval)
 
@@ -67,7 +66,7 @@ func TestRateLimiter_ConcurrentIntervalGuarantee(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rl.Wait("same-domain.com")
+			_ = rl.Wait(context.Background(), "same-domain.com")
 			mu.Lock()
 			timestamps = append(timestamps, time.Now())
 			mu.Unlock()
@@ -90,5 +89,26 @@ func TestRateLimiter_ConcurrentIntervalGuarantee(t *testing.T) {
 		if diff < interval-tolerance {
 			t.Errorf("Interval between requests %d and %d was %v, expected at least %v", i-1, i, diff, interval-tolerance)
 		}
+	}
+}
+
+func TestRateLimiter_ContextCancellation(t *testing.T) {
+	rl := New(500 * time.Millisecond)
+
+	// First call establishes last request timestamp
+	_ = rl.Wait(context.Background(), "cancel.com")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := rl.Wait(ctx, "cancel.com")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected context.DeadlineExceeded, got %v", err)
+	}
+	if elapsed >= 400*time.Millisecond {
+		t.Errorf("Wait should have aborted quickly upon context timeout, took %v", elapsed)
 	}
 }

@@ -779,3 +779,179 @@ func TestCrawler_SSRFProtection(t *testing.T) {
 		t.Errorf("Expected error to mention 'blocked by SSRF policy', got: %q", results[0].Error)
 	}
 }
+
+func TestCrawler_RateLimit429RetryAfter(t *testing.T) {
+	var attempts int
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		curr := attempts
+		mu.Unlock()
+
+		if curr == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, "Rate limit exceeded")
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><head><title>Success After 429</title></head><body>OK</body></html>")
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
+		StayOnDomain:    true,
+		Retries:         2,
+		AllowPrivateIPs: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if results[0].Title != "Success After 429" {
+		t.Errorf("Expected Title 'Success After 429', got %q (Error: %s)", results[0].Title, results[0].Error)
+	}
+}
+
+func TestCrawler_SpiderTrapRepetition(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>
+			<a href="/a/a/a/trap.html">Repetitive Trap</a>
+			<a href="/safe/page.html">Safe Page</a>
+		</body></html>`)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        2,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	for _, page := range results {
+		if strings.Contains(page.URL, "trap.html") {
+			t.Errorf("Crawler crawled spider trap URL %q, should have rejected it", page.URL)
+		}
+	}
+}
+
+func TestCrawler_MaxPagesPerDomain(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>
+			<a href="/p1">P1</a>
+			<a href="/p2">P2</a>
+			<a href="/p3">P3</a>
+			<a href="/p4">P4</a>
+		</body></html>`)
+	})
+	for i := 1; i <= 4; i++ {
+		curr := i
+		mux.HandleFunc(fmt.Sprintf("/p%d", curr), func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, "<html><head><title>P%d</title></head></html>", curr)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:             []string{server.URL + "/"},
+		Workers:           1,
+		MaxDepth:          2,
+		RateLimit:         0,
+		Timeout:           5 * time.Second,
+		MaxPages:          10,
+		MaxPagesPerDomain: 2, // Hard domain cap
+		StayOnDomain:      true,
+		AllowPrivateIPs:   true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) > 2 {
+		t.Errorf("Expected at most 2 pages crawled under MaxPagesPerDomain=2, got %d", len(results))
+	}
+}
+
+func TestCrawler_CharsetDecoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=windows-1252")
+		// Windows-1252 bytes for: <title>Café & Résumé</title>
+		// 'é' is 0xE9 in windows-1252 (not valid 2-byte UTF-8)
+		body := []byte("<html><head><title>Caf\xe9 & R\xe9sum\xe9</title></head><body>Hello</body></html>")
+		w.Write(body)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if results[0].Title != "Café & Résumé" {
+		t.Errorf("Expected decoded UTF-8 title 'Café & Résumé', got %q", results[0].Title)
+	}
+}
+
+func TestCrawler_CanonicalExtraction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head>
+			<title>Page With Canonical</title>
+			<link rel="canonical" href="https://example.com/canonical-master">
+			<meta name="description" content="Canonical test description">
+		</head><body>Content</body></html>`)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if results[0].CanonicalURL != "https://example.com/canonical-master" {
+		t.Errorf("Expected CanonicalURL 'https://example.com/canonical-master', got %q", results[0].CanonicalURL)
+	}
+	if results[0].Description != "Canonical test description" {
+		t.Errorf("Expected Description 'Canonical test description', got %q", results[0].Description)
+	}
+}
+

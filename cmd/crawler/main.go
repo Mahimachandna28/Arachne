@@ -46,6 +46,7 @@ func main() {
 	retries      := flag.Int("retries", 2, "Maximum retry attempts on transient errors (network error or 5xx)")
 	userAgent    := flag.String("useragent", crawler.DefaultUserAgent, "User-Agent header identifying the crawler")
 	allowPrivate := flag.Bool("allowprivate", false, "Allow crawling private/local network addresses (SSRF protection disabled)")
+	maxPerDomain := flag.Int("maxpagesperdomain", 0, "Maximum total pages to crawl per domain (0 = unlimited)")
 	flag.Parse()
 
 	// --- Resolve seed URLs ---
@@ -80,16 +81,17 @@ func main() {
 
 	// --- Build config and run ---
 	cfg := crawler.Config{
-		Seeds:           seeds,
-		Workers:         *workers,
-		MaxDepth:        *depth,
-		RateLimit:       time.Duration(*rateLimit) * time.Millisecond,
-		Timeout:         time.Duration(*timeout) * time.Second,
-		MaxPages:        *maxPages,
-		StayOnDomain:    *sameDomain,
-		Retries:         *retries,
-		UserAgent:       *userAgent,
-		AllowPrivateIPs: *allowPrivate,
+		Seeds:             seeds,
+		Workers:           *workers,
+		MaxDepth:          *depth,
+		RateLimit:         time.Duration(*rateLimit) * time.Millisecond,
+		Timeout:           time.Duration(*timeout) * time.Second,
+		MaxPages:          *maxPages,
+		MaxPagesPerDomain: *maxPerDomain,
+		StayOnDomain:      *sameDomain,
+		Retries:           *retries,
+		UserAgent:         *userAgent,
+		AllowPrivateIPs:   *allowPrivate,
 	}
 
 	results := crawler.New(cfg).Run(ctx)
