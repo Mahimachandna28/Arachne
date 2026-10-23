@@ -29,6 +29,7 @@ import (
 	"github.com/mahimachandna28/webcrawler/internal/result"
 	"github.com/mahimachandna28/webcrawler/internal/robots"
 	"github.com/mahimachandna28/webcrawler/internal/sitemap"
+	"github.com/mahimachandna28/webcrawler/internal/storage"
 )
 
 // DefaultUserAgent is the default User-Agent header identifying the crawler and repository.
@@ -49,6 +50,8 @@ type Config struct {
 	Retries           int           // Maximum retry attempts on transient failure (network error or 5xx)
 	UserAgent         string        // User-Agent request header (defaults to DefaultUserAgent)
 	AllowPrivateIPs   bool          // If true, allows connections to private/loopback IP addresses (disables SSRF guard, e.g. for testing)
+	JobID             string        // Optional Job ID in PostgreSQL storage
+	DB                *storage.DB   // Optional database connection for streaming persistence
 }
 
 // job represents a single crawl task sent through the job channel.
@@ -140,9 +143,26 @@ func (c *Crawler) Run(ctx context.Context) []result.Page {
 
 	var results []result.Page
 	collectorDone := make(chan struct{})
+
+	var batchWriter *storage.BatchWriter
+	if c.config.DB != nil && c.config.JobID != "" {
+		batchWriter = storage.NewBatchWriter(c.config.DB, c.config.JobID, storage.BatchWriterConfig{})
+	}
+
 	go func() {
 		for page := range c.resultCh {
 			results = append(results, page)
+			if batchWriter != nil {
+				batchWriter.Submit(page)
+			}
+		}
+		if batchWriter != nil {
+			_ = batchWriter.Close()
+			saved, errs := batchWriter.Stats()
+			_ = c.config.DB.FinishJob(context.Background(), c.config.JobID, storage.JobStatusCompleted, map[string]interface{}{
+				"pages_crawled": saved,
+				"errors":        errs,
+			})
 		}
 		close(collectorDone)
 	}()
