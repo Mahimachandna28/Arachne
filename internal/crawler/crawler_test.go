@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mahimachandna28/webcrawler/internal/blobstore"
 	"github.com/mahimachandna28/webcrawler/internal/result"
 )
 
@@ -952,6 +954,71 @@ func TestCrawler_CanonicalExtraction(t *testing.T) {
 	}
 	if results[0].Description != "Canonical test description" {
 		t.Errorf("Expected Description 'Canonical test description', got %q", results[0].Description)
+	}
+}
+
+func TestCrawler_BlobStoreArchiving(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "blobstore_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := blobstore.NewFileStore(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create file store: %v", err)
+	}
+
+	htmlContent := "<html><head><title>Blobstore Test</title></head><body><p>Hello Blobstore</p></body></html>"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, htmlContent)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
+		JobID:           "job-unit-test",
+		BlobStore:       store,
+	}
+
+	ctx := context.Background()
+	results := New(cfg).Run(ctx)
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+
+	page := results[0]
+	if page.PayloadPath == "" {
+		t.Fatal("Expected PayloadPath to be populated, got empty string")
+	}
+
+	// Verify the object exists in the store
+	exists, err := store.Exists(ctx, page.PayloadPath)
+	if err != nil || !exists {
+		t.Fatalf("Payload does not exist in store at %q: %v", page.PayloadPath, err)
+	}
+
+	// Read and decompress
+	compressed, err := store.Get(ctx, page.PayloadPath)
+	if err != nil {
+		t.Fatalf("Failed to get payload from store: %v", err)
+	}
+
+	decompressed, err := blobstore.DecompressGzip(compressed)
+	if err != nil {
+		t.Fatalf("Failed to decompress stored payload: %v", err)
+	}
+
+	if string(decompressed) != htmlContent {
+		t.Errorf("Decompressed content mismatch: got %q, want %q", string(decompressed), htmlContent)
 	}
 }
 

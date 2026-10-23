@@ -29,24 +29,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mahimachandna28/webcrawler/internal/blobstore"
 	"github.com/mahimachandna28/webcrawler/internal/crawler"
 )
 
 func main() {
 	// --- CLI Flags ---
-	workers     := flag.Int("workers", 5, "Number of concurrent worker goroutines")
-	depth       := flag.Int("depth", 2, "Maximum link-follow depth")
-	maxPages    := flag.Int("maxpages", 20, "Maximum total pages to crawl (0 = unlimited)")
-	rateLimit   := flag.Int("ratelimit", 500, "Milliseconds between requests to same domain")
-	timeout     := flag.Int("timeout", 10, "HTTP request timeout in seconds")
-	seedFlag    := flag.String("seed", "", "Comma-separated seed URLs (overrides seeds/seeds.txt)")
-	outputFile  := flag.String("output", "results.json", "Output file path for crawl results")
-	sameDomain  := flag.Bool("samedomain", true, "Only follow links on the same domain as seed")
-	maxDuration := flag.Duration("maxduration", 0, "Maximum crawl duration (e.g. 10s, 1m; default: 0 = unlimited)")
+	workers      := flag.Int("workers", 5, "Number of concurrent worker goroutines")
+	depth        := flag.Int("depth", 2, "Maximum link-follow depth")
+	maxPages     := flag.Int("maxpages", 20, "Maximum total pages to crawl (0 = unlimited)")
+	rateLimit    := flag.Int("ratelimit", 500, "Milliseconds between requests to same domain")
+	timeout      := flag.Int("timeout", 10, "HTTP request timeout in seconds")
+	seedFlag     := flag.String("seed", "", "Comma-separated seed URLs (overrides seeds/seeds.txt)")
+	outputFile   := flag.String("output", "results.json", "Output file path for crawl results")
+	sameDomain   := flag.Bool("samedomain", true, "Only follow links on the same domain as seed")
+	maxDuration  := flag.Duration("maxduration", 0, "Maximum crawl duration (e.g. 10s, 1m; default: 0 = unlimited)")
 	retries      := flag.Int("retries", 2, "Maximum retry attempts on transient errors (network error or 5xx)")
 	userAgent    := flag.String("useragent", crawler.DefaultUserAgent, "User-Agent header identifying the crawler")
 	allowPrivate := flag.Bool("allowprivate", false, "Allow crawling private/local network addresses (SSRF protection disabled)")
 	maxPerDomain := flag.Int("maxpagesperdomain", 0, "Maximum total pages to crawl per domain (0 = unlimited)")
+	payloadDir   := flag.String("payload-dir", "", "Directory to store gzipped raw HTML payloads (enables blob storage)")
 	flag.Parse()
 
 	// --- Resolve seed URLs ---
@@ -79,6 +81,18 @@ func main() {
 		defer cancel()
 	}
 
+	// --- Setup blobstore for payload archiving if requested ---
+	var bStore blobstore.Store
+	if *payloadDir != "" {
+		fs, err := blobstore.NewFileStore(*payloadDir)
+		if err != nil {
+			fmt.Printf("⚠️ Warning: Failed to initialize payload store at %s: %v\n", *payloadDir, err)
+		} else {
+			bStore = fs
+			fmt.Printf("📦 Raw payload archiving enabled -> %s\n", *payloadDir)
+		}
+	}
+
 	// --- Build config and run ---
 	cfg := crawler.Config{
 		Seeds:             seeds,
@@ -92,6 +106,7 @@ func main() {
 		Retries:           *retries,
 		UserAgent:         *userAgent,
 		AllowPrivateIPs:   *allowPrivate,
+		BlobStore:         bStore,
 	}
 
 	results := crawler.New(cfg).Run(ctx)

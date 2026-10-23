@@ -197,16 +197,22 @@ func (d *DB) BatchSaveResults(ctx context.Context, jobID string, pages []result.
 				descPtr = &p.Description
 			}
 
+			var payloadPathPtr *string
+			if p.PayloadPath != "" {
+				payloadPathPtr = &p.PayloadPath
+			}
+
 			pageInsert := `
-				INSERT INTO pages (url_id, title, meta_description, links_count, outbound_links)
-				VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO pages (url_id, title, meta_description, links_count, outbound_links, s3_payload_path)
+				VALUES ($1, $2, $3, $4, $5, $6)
 				ON CONFLICT (url_id) DO UPDATE SET
 					title = EXCLUDED.title,
 					meta_description = EXCLUDED.meta_description,
 					links_count = EXCLUDED.links_count,
-					outbound_links = EXCLUDED.outbound_links
+					outbound_links = EXCLUDED.outbound_links,
+					s3_payload_path = EXCLUDED.s3_payload_path
 			`
-			_, err = tx.Exec(ctx, pageInsert, urlID, titlePtr, descPtr, len(p.Links), p.Links)
+			_, err = tx.Exec(ctx, pageInsert, urlID, titlePtr, descPtr, len(p.Links), p.Links, payloadPathPtr)
 			if err != nil {
 				return fmt.Errorf("failed to insert page document for url %d: %w", urlID, err)
 			}
