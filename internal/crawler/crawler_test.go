@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mahimachandna28/webcrawler/internal/blobstore"
+	"github.com/mahimachandna28/webcrawler/internal/dedup"
 	"github.com/mahimachandna28/webcrawler/internal/result"
 )
 
@@ -1021,4 +1022,47 @@ func TestCrawler_BlobStoreArchiving(t *testing.T) {
 		t.Errorf("Decompressed content mismatch: got %q, want %q", string(decompressed), htmlContent)
 	}
 }
+
+func TestCrawler_TwoTierDeduplication(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/b">Go to B</a></body></html>`)
+	})
+	mux.HandleFunc("/b", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/a">Back to A</a></body></html>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	bloom := dedup.NewMemoryBloom(1000, 0.01)
+	dd := dedup.NewTwoTier(bloom, nil)
+
+	cfg := Config{
+		Seeds:           []string{server.URL + "/a"},
+		Workers:         1,
+		MaxDepth:        2,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
+		StayOnDomain:    true,
+		AllowPrivateIPs: true,
+		Dedup:           dd,
+	}
+
+	results := New(cfg).Run(context.Background())
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 crawled pages (/a and /b), got %d", len(results))
+	}
+
+	metrics := dd.Metrics()
+	if metrics.TotalChecked < 2 {
+		t.Errorf("Expected at least 2 checked URLs, got %d", metrics.TotalChecked)
+	}
+	if metrics.Tier1Negatives < 2 {
+		t.Errorf("Expected at least 2 Tier1Negatives, got %d", metrics.Tier1Negatives)
+	}
+}
+
 

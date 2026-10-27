@@ -24,6 +24,7 @@ import (
 	"golang.org/x/text/transform"
 
 	"github.com/mahimachandna28/webcrawler/internal/blobstore"
+	"github.com/mahimachandna28/webcrawler/internal/dedup"
 	"github.com/mahimachandna28/webcrawler/internal/netguard"
 	"github.com/mahimachandna28/webcrawler/internal/parser"
 	"github.com/mahimachandna28/webcrawler/internal/ratelimiter"
@@ -38,22 +39,23 @@ const DefaultUserAgent = "ArachneCrawlerBot/1.0 (+https://github.com/mahimachand
 
 // Config holds the configuration for a crawl run.
 type Config struct {
-	Seeds             []string        // Starting URLs
-	Workers           int             // Number of concurrent worker goroutines
-	MaxDepth          int             // Maximum link depth to follow
-	RateLimit         time.Duration   // Minimum time between requests to the same domain
-	Timeout           time.Duration   // HTTP request timeout
-	MaxPages          int             // Maximum total pages to crawl (0 = unlimited)
-	MaxPagesPerDomain int             // Maximum pages to crawl per domain (0 = unlimited)
-	MaxRedirects      int             // Maximum redirects to follow (default: 10)
-	MaxBodyBytes      int64           // Maximum bytes to read per page (default: 2MB)
-	StayOnDomain      bool            // If true, only follow links on the same domain as seed
-	Retries           int             // Maximum retry attempts on transient failure (network error or 5xx)
-	UserAgent         string          // User-Agent request header (defaults to DefaultUserAgent)
-	AllowPrivateIPs   bool            // If true, allows connections to private/loopback IP addresses (disables SSRF guard, e.g. for testing)
-	JobID             string          // Optional Job ID in PostgreSQL storage
-	DB                *storage.DB     // Optional database connection for streaming persistence
-	BlobStore         blobstore.Store // Optional object store for archiving raw compressed HTML payloads
+	Seeds             []string          // Starting URLs
+	Workers           int               // Number of concurrent worker goroutines
+	MaxDepth          int               // Maximum link depth to follow
+	RateLimit         time.Duration     // Minimum time between requests to the same domain
+	Timeout           time.Duration     // HTTP request timeout
+	MaxPages          int               // Maximum total pages to crawl (0 = unlimited)
+	MaxPagesPerDomain int               // Maximum pages to crawl per domain (0 = unlimited)
+	MaxRedirects      int               // Maximum redirects to follow (default: 10)
+	MaxBodyBytes      int64             // Maximum bytes to read per page (default: 2MB)
+	StayOnDomain      bool              // If true, only follow links on the same domain as seed
+	Retries           int               // Maximum retry attempts on transient failure (network error or 5xx)
+	UserAgent         string            // User-Agent request header (defaults to DefaultUserAgent)
+	AllowPrivateIPs   bool              // If true, allows connections to private/loopback IP addresses (disables SSRF guard, e.g. for testing)
+	JobID             string            // Optional Job ID in PostgreSQL storage
+	DB                *storage.DB       // Optional database connection for streaming persistence
+	BlobStore         blobstore.Store   // Optional object store for archiving raw compressed HTML payloads
+	Dedup             dedup.Deduplicator // Optional two-tier deduplicator (Bloom filter + DB verification)
 }
 
 // job represents a single crawl task sent through the job channel.
@@ -420,6 +422,14 @@ func (c *Crawler) enqueue(ctx context.Context, rawURL string, depth int) {
 	}
 	c.visited[rawURL] = true
 	c.visitedMu.Unlock()
+
+	// 3.2 Two-Tier Deduplication (Tier 1 Bloom Filter + Tier 2 Database Verification)
+	if c.config.Dedup != nil {
+		shouldCrawl, err := c.config.Dedup.ShouldCrawl(ctx, c.config.JobID, rawURL)
+		if err != nil || !shouldCrawl {
+			return
+		}
+	}
 
 	domain := strings.ToLower(u.Host)
 

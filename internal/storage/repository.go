@@ -230,3 +230,17 @@ func HashURL(rawURL string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(rawURL)))
 	return hex.EncodeToString(sum[:])
 }
+
+// IsURLVisited checks whether a URL (by normalized hash) has already been stored for a crawl job.
+func (d *DB) IsURLVisited(ctx context.Context, jobID, normalizedHash string) (bool, error) {
+	query := `SELECT 1 FROM urls WHERE job_id = $1 AND normalized_hash = $2 LIMIT 1`
+	var exists int
+	err := d.pool.QueryRow(ctx, query, jobID, normalizedHash).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check url visited status: %w", err)
+	}
+	return true, nil
+}
