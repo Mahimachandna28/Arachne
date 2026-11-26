@@ -25,20 +25,20 @@ var (
 
 // Item represents a single URL crawl task inside the distributed frontier stream.
 type Item struct {
-	ID        string    `json:"id,omitempty"`        // Redis stream message ID (e.g. "1698064800000-0")
-	URL       string    `json:"url"`                 // Target URL to fetch
-	Depth     int       `json:"depth"`               // Depth level from seed
-	Domain    string    `json:"domain"`              // Extracted domain for politeness partitioning
-	Retries   int       `json:"retries"`             // Number of failed fetch attempts
+	ID         string    `json:"id,omitempty"`          // Redis stream message ID (e.g. "1698064800000-0")
+	URL        string    `json:"url"`                   // Target URL to fetch
+	Depth      int       `json:"depth"`                 // Depth level from seed
+	Domain     string    `json:"domain"`                // Extracted domain for politeness partitioning
+	Retries    int       `json:"retries"`               // Number of failed fetch attempts
 	EnqueuedAt time.Time `json:"enqueued_at,omitempty"` // Timestamp when URL was enqueued
 }
 
 // DLQItem represents a failed crawl task routed to the Dead Letter Queue.
 type DLQItem struct {
-	Item         Item      `json:"item"`
-	Reason       string    `json:"reason"`
-	FailedAt     time.Time `json:"failed_at"`
-	OriginalID   string    `json:"original_id"`
+	Item       Item      `json:"item"`
+	Reason     string    `json:"reason"`
+	FailedAt   time.Time `json:"failed_at"`
+	OriginalID string    `json:"original_id"`
 }
 
 // Frontier defines the interface for distributed or local crawl queue backends.

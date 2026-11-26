@@ -2,10 +2,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/mahimachandna28/webcrawler/internal/result"
+	"github.com/Mahimachandna28/Arachne/internal/result"
 )
 
 // BatchWriterConfig controls the flush thresholds of the streaming persistence pipeline.
@@ -24,9 +25,11 @@ type BatchWriter struct {
 	flushDone chan struct{}
 	closeOnce sync.Once
 
-	statsMu    sync.Mutex
-	totalSaved int
-	totalError int
+	statsMu     sync.Mutex
+	totalSaved  int   // pages durably written
+	totalError  int   // saved pages that were crawl failures (HTTP/network error)
+	totalFailed int   // pages lost because the DB write itself failed
+	lastErr     error // most recent DB write error
 }
 
 // NewBatchWriter initializes and starts a streaming BatchWriter.
@@ -71,15 +74,28 @@ func (bw *BatchWriter) loop() {
 		toPersist := buffer
 		buffer = make([]result.Page, 0, bw.config.BatchSize)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = bw.db.BatchSaveResults(ctx, bw.jobID, toPersist)
-		cancel()
+		// One retry covers transient failures (connection reset, failover).
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err = bw.db.BatchSaveResults(ctx, bw.jobID, toPersist)
+			cancel()
+			if err == nil {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 
 		bw.statsMu.Lock()
-		for _, p := range toPersist {
-			bw.totalSaved++
-			if p.Error != "" {
-				bw.totalError++
+		if err != nil {
+			bw.totalFailed += len(toPersist)
+			bw.lastErr = err
+		} else {
+			for _, p := range toPersist {
+				bw.totalSaved++
+				if p.Error != "" {
+					bw.totalError++
+				}
 			}
 		}
 		bw.statsMu.Unlock()
@@ -108,6 +124,11 @@ func (bw *BatchWriter) Close() error {
 		close(bw.inputCh)
 	})
 	<-bw.flushDone
+	bw.statsMu.Lock()
+	defer bw.statsMu.Unlock()
+	if bw.totalFailed > 0 {
+		return fmt.Errorf("batch writer: %d pages not persisted, last error: %w", bw.totalFailed, bw.lastErr)
+	}
 	return nil
 }
 

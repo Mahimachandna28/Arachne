@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/mahimachandna28/webcrawler/internal/storage"
+	"github.com/Mahimachandna28/Arachne/internal/storage"
 )
 
 // Metrics records performance counters for the two-tier deduplicator.

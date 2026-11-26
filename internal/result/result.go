@@ -11,5 +11,6 @@ type Page struct {
 	PayloadPath  string   `json:"payload_path,omitempty"`  // Object store / S3 key for raw compressed HTML/WARC
 	Links        []string `json:"links,omitempty"`         // All hyperlinks found on the page
 	StatusCode   int      `json:"status_code"`             // HTTP response status code
+	Depth        int      `json:"depth"`                   // Link distance from the seed URL
 	Error        string   `json:"error,omitempty"`         // Non-empty if crawling failed
 }

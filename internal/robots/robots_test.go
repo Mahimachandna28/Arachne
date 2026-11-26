@@ -37,11 +37,11 @@ Crawl-delay: 2.5
 		{"/admin", false},
 		{"/admin/users", false},
 		{"/private/secret", false},
-		{"/private/public-doc", true},           // Allow overrides Disallow because it's longer
-		{"/documents/annual.pdf", false},         // Matched /*.pdf$
-		{"/documents/annual.pdf.txt", true},     // Not ending with .pdf
-		{"/temp/2026/report", false},            // Matched /temp/*/report
-		{"/temp/2026/report/summary", false},    // Prefix of /temp/*/report
+		{"/private/public-doc", true},        // Allow overrides Disallow because it's longer
+		{"/documents/annual.pdf", false},     // Matched /*.pdf$
+		{"/documents/annual.pdf.txt", true},  // Not ending with .pdf
+		{"/temp/2026/report", false},         // Matched /temp/*/report
+		{"/temp/2026/report/summary", false}, // Prefix of /temp/*/report
 	}
 
 	for _, tt := range tests {
