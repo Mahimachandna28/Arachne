@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/mahimachandna28/webcrawler/internal/result"
 )
 
 var (
@@ -125,106 +123,6 @@ func (d *DB) GetOrCreateDomain(ctx context.Context, domainName string) (int, err
 	return id, nil
 }
 
-// BatchSaveResults persists a batch of crawled pages transactionally using pgx.Batch.
-func (d *DB) BatchSaveResults(ctx context.Context, jobID string, pages []result.Page) error {
-	if len(pages) == 0 {
-		return nil
-	}
-
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	for _, p := range pages {
-		u, err := url.Parse(p.URL)
-		if err != nil || u.Host == "" {
-			continue
-		}
-		domain := strings.ToLower(u.Host)
-
-		// 1. Resolve domain ID
-		var domainID int
-		err = tx.QueryRow(ctx, `
-			INSERT INTO domains (domain) VALUES ($1)
-			ON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain
-			RETURNING id
-		`, domain).Scan(&domainID)
-		if err != nil {
-			return fmt.Errorf("failed to resolve domain %q: %w", domain, err)
-		}
-
-		// 2. Insert into urls
-		urlHash := HashURL(p.URL)
-		status := URLStatusCompleted
-		var errMessage *string
-		if p.Error != "" {
-			status = URLStatusFailed
-			errMessage = &p.Error
-		}
-
-		var canonicalPtr *string
-		if p.CanonicalURL != "" {
-			canonicalPtr = &p.CanonicalURL
-		}
-
-		var urlID int64
-		urlInsert := `
-			INSERT INTO urls (job_id, domain_id, raw_url, normalized_hash, depth, status, status_code, error_message, canonical_url, crawled_at)
-			VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8, NOW())
-			ON CONFLICT (job_id, normalized_hash) DO UPDATE SET
-				status = EXCLUDED.status,
-				status_code = EXCLUDED.status_code,
-				error_message = EXCLUDED.error_message,
-				canonical_url = EXCLUDED.canonical_url,
-				crawled_at = EXCLUDED.crawled_at
-			RETURNING id
-		`
-		err = tx.QueryRow(ctx, urlInsert, jobID, domainID, p.URL, urlHash, status, p.StatusCode, errMessage, canonicalPtr).Scan(&urlID)
-		if err != nil {
-			return fmt.Errorf("failed to insert url record %q: %w", p.URL, err)
-		}
-
-		// 3. Insert page document if successful
-		if p.Error == "" {
-			var titlePtr *string
-			if p.Title != "" {
-				titlePtr = &p.Title
-			}
-			var descPtr *string
-			if p.Description != "" {
-				descPtr = &p.Description
-			}
-
-			var payloadPathPtr *string
-			if p.PayloadPath != "" {
-				payloadPathPtr = &p.PayloadPath
-			}
-
-			pageInsert := `
-				INSERT INTO pages (url_id, title, meta_description, links_count, outbound_links, s3_payload_path)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (url_id) DO UPDATE SET
-					title = EXCLUDED.title,
-					meta_description = EXCLUDED.meta_description,
-					links_count = EXCLUDED.links_count,
-					outbound_links = EXCLUDED.outbound_links,
-					s3_payload_path = EXCLUDED.s3_payload_path
-			`
-			_, err = tx.Exec(ctx, pageInsert, urlID, titlePtr, descPtr, len(p.Links), p.Links, payloadPathPtr)
-			if err != nil {
-				return fmt.Errorf("failed to insert page document for url %d: %w", urlID, err)
-			}
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit batch save transaction: %w", err)
-	}
-	return nil
-}
-
 // HashURL computes a normalized SHA-256 hash of a URL.
 func HashURL(rawURL string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(rawURL)))
@@ -243,4 +141,10 @@ func (d *DB) IsURLVisited(ctx context.Context, jobID, normalizedHash string) (bo
 		return false, fmt.Errorf("failed to check url visited status: %w", err)
 	}
 	return true, nil
+}
+
+// IsVisited implements dedup.ExactVerifier so a *DB can serve as the exact
+// (tier 2) check behind a Bloom filter.
+func (d *DB) IsVisited(ctx context.Context, jobID, normalizedHash string) (bool, error) {
+	return d.IsURLVisited(ctx, jobID, normalizedHash)
 }

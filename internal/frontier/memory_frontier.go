@@ -10,14 +10,14 @@ import (
 // MemoryFrontier is an in-memory, thread-safe implementation of Frontier.
 // Useful for local testing, embedded crawls, and zero-dependency environments.
 type MemoryFrontier struct {
-	mu       sync.Mutex
-	items    []Item
-	pending  map[string]Item        // consumer/in-flight message ID -> Item
+	mu           sync.Mutex
+	items        []Item
+	pending      map[string]Item      // consumer/in-flight message ID -> Item
 	pendingTimes map[string]time.Time // message ID -> dequeue time
-	dlq      []DLQItem
-	seq      int64
-	closed   bool
-	notifyCh chan struct{}
+	dlq          []DLQItem
+	seq          int64
+	closed       bool
+	notifyCh     chan struct{}
 }
 
 // NewMemoryFrontier creates a new in-memory Frontier.

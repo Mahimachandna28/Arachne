@@ -1,85 +1,93 @@
 // Package crawler implements the core concurrent web crawling logic.
-// It uses a worker-pool pattern:
-//   - A fixed pool of N goroutines (workers) reads URLs from a shared job channel
-//   - A visited map (protected by a mutex) prevents duplicate crawling
-//   - A rate limiter (mutex-backed) throttles requests per domain
-//   - A sync.WaitGroup tracks in-flight jobs (not workers), so jobCh closes
-//     automatically when the queue drains — no deadlock possible
+//
+// Architecture:
+//   - enqueue() normalizes, filters (spider traps, robots, dedup, page caps)
+//     and pushes jobs into a per-host scheduler. It never blocks.
+//   - The scheduler (internal/scheduler) hands a worker only a URL whose host
+//     may be contacted now, so politeness never stalls other hosts.
+//   - N worker goroutines fetch, parse, emit results and enqueue children.
+//   - Transient failures (network errors, 5xx, 429) are rescheduled with
+//     exponential backoff instead of sleeping inside the worker.
+//   - The crawl ends exactly when nothing is queued, in flight, or held by a
+//     producer (seeding, sitemap discovery).
 package crawler
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/text/encoding/htmlindex"
-	"golang.org/x/text/transform"
+	"golang.org/x/sync/singleflight"
 
-	"github.com/mahimachandna28/webcrawler/internal/blobstore"
-	"github.com/mahimachandna28/webcrawler/internal/dedup"
-	"github.com/mahimachandna28/webcrawler/internal/netguard"
-	"github.com/mahimachandna28/webcrawler/internal/parser"
-	"github.com/mahimachandna28/webcrawler/internal/ratelimiter"
-	"github.com/mahimachandna28/webcrawler/internal/result"
-	"github.com/mahimachandna28/webcrawler/internal/robots"
-	"github.com/mahimachandna28/webcrawler/internal/sitemap"
-	"github.com/mahimachandna28/webcrawler/internal/storage"
+	"github.com/Mahimachandna28/Arachne/internal/blobstore"
+	"github.com/Mahimachandna28/Arachne/internal/dedup"
+	"github.com/Mahimachandna28/Arachne/internal/netguard"
+	"github.com/Mahimachandna28/Arachne/internal/parser"
+	"github.com/Mahimachandna28/Arachne/internal/ratelimiter"
+	"github.com/Mahimachandna28/Arachne/internal/result"
+	"github.com/Mahimachandna28/Arachne/internal/robots"
+	"github.com/Mahimachandna28/Arachne/internal/scheduler"
+	"github.com/Mahimachandna28/Arachne/internal/sitemap"
+	"github.com/Mahimachandna28/Arachne/internal/storage"
+	"github.com/Mahimachandna28/Arachne/internal/urlnorm"
 )
 
 // DefaultUserAgent is the default User-Agent header identifying the crawler and repository.
-const DefaultUserAgent = "ArachneCrawlerBot/1.0 (+https://github.com/mahimachandna28/Arachne)"
+const DefaultUserAgent = "ArachneCrawlerBot/1.0 (+https://github.com/Mahimachandna28/Arachne)"
 
 // Config holds the configuration for a crawl run.
 type Config struct {
-	Seeds             []string          // Starting URLs
-	Workers           int               // Number of concurrent worker goroutines
-	MaxDepth          int               // Maximum link depth to follow
-	RateLimit         time.Duration     // Minimum time between requests to the same domain
-	Timeout           time.Duration     // HTTP request timeout
-	MaxPages          int               // Maximum total pages to crawl (0 = unlimited)
-	MaxPagesPerDomain int               // Maximum pages to crawl per domain (0 = unlimited)
-	MaxRedirects      int               // Maximum redirects to follow (default: 10)
-	MaxBodyBytes      int64             // Maximum bytes to read per page (default: 2MB)
-	StayOnDomain      bool              // If true, only follow links on the same domain as seed
-	Retries           int               // Maximum retry attempts on transient failure (network error or 5xx)
-	UserAgent         string            // User-Agent request header (defaults to DefaultUserAgent)
-	AllowPrivateIPs   bool              // If true, allows connections to private/loopback IP addresses (disables SSRF guard, e.g. for testing)
-	JobID             string            // Optional Job ID in PostgreSQL storage
-	DB                *storage.DB       // Optional database connection for streaming persistence
-	BlobStore         blobstore.Store   // Optional object store for archiving raw compressed HTML payloads
-	Dedup             dedup.Deduplicator // Optional two-tier deduplicator (Bloom filter + DB verification)
-}
+	Seeds             []string           // Starting URLs
+	Workers           int                // Number of concurrent worker goroutines
+	MaxDepth          int                // Maximum link depth to follow
+	RateLimit         time.Duration      // Minimum time between requests to the same host
+	Timeout           time.Duration      // HTTP request timeout
+	MaxPages          int                // Maximum total pages to crawl (0 = unlimited)
+	MaxPagesPerDomain int                // Maximum pages to crawl per host (0 = unlimited)
+	MaxRedirects      int                // Maximum redirects to follow (default: 10)
+	MaxBodyBytes      int64              // Maximum bytes to read per page (default: 1MB)
+	StayOnDomain      bool               // If true, only follow links on the same host as the parent page
+	Retries           int                // Maximum retry attempts on transient failure (network error, 5xx, 429)
+	UserAgent         string             // User-Agent request header (defaults to DefaultUserAgent)
+	AllowPrivateIPs   bool               // If true, disables the SSRF guard (e.g. for tests against localhost)
+	JobID             string             // Optional Job ID in PostgreSQL storage
+	DB                *storage.DB        // Optional database connection for streaming persistence
+	BlobStore         blobstore.Store    // Optional object store for archiving raw compressed HTML payloads
+	Dedup             dedup.Deduplicator // Optional shared deduplicator (Bloom + DB), consulted after the in-memory set
 
-// job represents a single crawl task sent through the job channel.
-type job struct {
-	url   string
-	depth int
+	// OnPage, if set, receives every result as it is produced and Run returns
+	// nil instead of accumulating results in memory. Called from a single
+	// goroutine, so it need not be thread-safe.
+	OnPage func(result.Page)
+
+	// Quiet suppresses per-URL progress output.
+	Quiet bool
 }
 
 // Crawler orchestrates the worker pool and manages shared state.
 type Crawler struct {
-	config        Config
-	jobCh         chan job                  // Channel workers read jobs from
-	resultCh      chan result.Page          // Channel workers send results to
-	jobWg         sync.WaitGroup           // Tracks in-flight jobs (not workers)
-	visited       map[string]bool          // Tracks visited URLs
-	visitedMu     sync.Mutex               // Protects the visited map
-	pageCount     int                      // Total pages crawled so far
-	pageCountMu   sync.Mutex               // Protects pageCount
-	domainCount   map[string]int           // Total pages crawled per domain
-	domainCountMu sync.Mutex               // Protects domainCount
-	limiter       *ratelimiter.RateLimiter
-	client        *http.Client
-	robotsCache   map[string]*robots.Policy // Thread-safe cache of robots.txt policy per domain
-	robotsMu      sync.Mutex               // Protects robotsCache
+	config   Config
+	sched    *scheduler.Scheduler
+	resultCh chan result.Page
+	limiter  *ratelimiter.RateLimiter // per-host interval registry (default, Crawl-delay, Retry-After)
+	client   *http.Client
+
+	visitedMu sync.Mutex
+	visited   map[uint64]struct{} // 64-bit fingerprints of normalized URLs
+
+	countMu     sync.Mutex
+	pageCount   int
+	domainCount map[string]int
+
+	robotsMu    sync.RWMutex
+	robotsCache map[string]*robots.Policy
+	robotsGroup singleflight.Group
 }
 
 // New creates a new Crawler with the given configuration.
@@ -93,13 +101,15 @@ func New(cfg Config) *Crawler {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = 1 << 20 // 1MB default
 	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 1
+	}
 
 	guard := netguard.New(netguard.Config{
 		AllowPrivate: cfg.AllowPrivateIPs,
 		DialTimeout:  cfg.Timeout,
 	})
 
-	// 1.3 Transport & Connection Pool Tuning
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           guard.DialContext,
@@ -109,7 +119,6 @@ func New(cfg Config) *Crawler {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    false,
 	}
 
 	maxRedirects := cfg.MaxRedirects
@@ -124,28 +133,36 @@ func New(cfg Config) *Crawler {
 		},
 	}
 
+	limiter := ratelimiter.New(cfg.RateLimit)
 	return &Crawler{
 		config:      cfg,
-		jobCh:       make(chan job, cfg.Workers*20),
-		resultCh:    make(chan result.Page, cfg.Workers*20),
-		visited:     make(map[string]bool),
-		domainCount: make(map[string]int),
-		limiter:     ratelimiter.New(cfg.RateLimit),
+		sched:       scheduler.New(limiter.GetInterval),
+		resultCh:    make(chan result.Page, cfg.Workers*4),
+		limiter:     limiter,
 		client:      client,
+		visited:     make(map[uint64]struct{}),
+		domainCount: make(map[string]int),
 		robotsCache: make(map[string]*robots.Policy),
 	}
 }
 
-// Run starts the crawl and returns all results when complete.
-// It respects cancellation and deadlines via the provided ctx.
+func (c *Crawler) logf(format string, args ...any) {
+	if !c.config.Quiet {
+		fmt.Printf(format, args...)
+	}
+}
+
+// Run starts the crawl and blocks until it completes or ctx is cancelled.
+// It returns all results, unless Config.OnPage is set (then it returns nil).
 func (c *Crawler) Run(ctx context.Context) []result.Page {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	fmt.Printf("🚀 Starting crawler with %d workers\n", c.config.Workers)
-	fmt.Printf("📋 Seeds: %v\n\n", c.config.Seeds)
+	c.logf("🚀 Starting crawler with %d workers\n", c.config.Workers)
+	c.logf("📋 Seeds: %v\n\n", c.config.Seeds)
 
 	var results []result.Page
+	var total int
 	collectorDone := make(chan struct{})
 
 	var batchWriter *storage.BatchWriter
@@ -154,231 +171,224 @@ func (c *Crawler) Run(ctx context.Context) []result.Page {
 	}
 
 	go func() {
+		defer close(collectorDone)
 		for page := range c.resultCh {
-			results = append(results, page)
+			total++
+			if c.config.OnPage != nil {
+				c.config.OnPage(page)
+			} else {
+				results = append(results, page)
+			}
 			if batchWriter != nil {
 				batchWriter.Submit(page)
 			}
 		}
 		if batchWriter != nil {
-			_ = batchWriter.Close()
+			closeErr := batchWriter.Close()
 			saved, errs := batchWriter.Stats()
-			_ = c.config.DB.FinishJob(context.Background(), c.config.JobID, storage.JobStatusCompleted, map[string]interface{}{
-				"pages_crawled": saved,
-				"errors":        errs,
-			})
+			status := storage.JobStatusCompleted
+			stats := map[string]interface{}{"pages_crawled": saved, "errors": errs}
+			switch {
+			case closeErr != nil:
+				status = storage.JobStatusFailed
+				stats["persist_error"] = closeErr.Error()
+				c.logf("⚠️  %v\n", closeErr)
+			case ctx.Err() != nil:
+				status = storage.JobStatusStopped
+			}
+			if err := c.config.DB.FinishJob(context.Background(), c.config.JobID, status, stats); err != nil {
+				c.logf("⚠️  failed to record job completion: %v\n", err)
+			}
 		}
-		close(collectorDone)
 	}()
 
 	var workerWg sync.WaitGroup
-	for i := 1; i <= c.config.Workers; i++ {
+	for i := 0; i < c.config.Workers; i++ {
 		workerWg.Add(1)
-		go func(id int) {
+		go func() {
 			defer workerWg.Done()
-			c.worker(ctx, id)
-		}(i)
+			c.worker(ctx)
+		}()
 	}
 
-	// Seed the job channel with starting URLs
+	// Hold the scheduler open while seeding so idle workers don't conclude
+	// the crawl is finished before the first URL arrives.
+	c.sched.Hold()
 	for _, seedURL := range c.config.Seeds {
 		if ctx.Err() != nil {
 			break
 		}
 		c.enqueue(ctx, seedURL, 0)
 	}
-
-	// Closer goroutine: waits until all in-flight jobs are done or ctx is canceled
-	go func() {
-		waitDone := make(chan struct{})
-		go func() {
-			c.jobWg.Wait()
-			close(waitDone)
-		}()
-
-		select {
-		case <-waitDone:
-		case <-ctx.Done():
-		}
-		close(c.jobCh)
-	}()
+	c.sched.Release()
 
 	workerWg.Wait()
 	close(c.resultCh)
 	<-collectorDone
 
 	if ctx.Err() != nil {
-		fmt.Printf("\n⚠️  Crawl stopped: %v\n", ctx.Err())
+		c.logf("\n⚠️  Crawl stopped: %v\n", ctx.Err())
 	}
-	fmt.Printf("\n✅ Crawl complete. Total pages crawled: %d\n", len(results))
+	c.logf("\n✅ Crawl complete. Total pages crawled: %d\n", total)
 	return results
 }
 
-// worker reads jobs from jobCh until closed or ctx canceled.
-func (c *Crawler) worker(ctx context.Context, id int) {
+// worker pulls ready jobs from the scheduler until the crawl ends.
+func (c *Crawler) worker(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		j, ok := c.sched.Next(ctx)
+		if !ok {
 			return
-		case j, ok := <-c.jobCh:
-			if !ok {
-				return
-			}
-			page, noFollow := c.fetch(ctx, j.url, j.depth)
-			select {
-			case c.resultCh <- page:
-			case <-ctx.Done():
-				c.jobWg.Done()
-				return
-			}
-
-			// Enqueue child links if permitted by depth, error status, and robots nofollow
-			if page.Error == "" && !noFollow && j.depth < c.config.MaxDepth {
-				for _, link := range page.Links {
-					if ctx.Err() != nil {
-						break
-					}
-					resolved := c.resolveURL(j.url, link)
-					if resolved != "" {
-						c.enqueue(ctx, resolved, j.depth+1)
-					}
-				}
-			}
-
-			c.jobWg.Done()
 		}
+		c.process(ctx, j)
 	}
 }
 
-// fetch performs the HTTP GET for a single URL using exponential backoff with full jitter,
-// handling 429/503 status codes with Retry-After headers, and safe charset decoding.
-func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) (result.Page, bool) {
-	maxAttempts := c.config.Retries + 1
-	if maxAttempts < 1 {
-		maxAttempts = 1
+func (c *Crawler) process(ctx context.Context, j scheduler.Job) {
+	u, err := url.Parse(j.URL)
+	if err != nil {
+		c.sched.Done(j)
+		return
 	}
 
-	var lastPage result.Page
+	// robots.txt is resolved lazily, once per host, by the first worker that
+	// is scheduled for that host. URLs admitted before the policy was known
+	// are filtered here and their page-budget slot is returned.
+	if !c.policyFor(ctx, u).IsAllowed(u.Path) {
+		c.releaseSlot(j.Host)
+		c.sched.Done(j)
+		return
+	}
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			// 1.4 Full Jitter Exponential Backoff:
-			// Sleep = rand(0, min(maxBackoff, baseBackoff * 2^(attempt-1)))
-			baseBackoff := 50 * time.Millisecond
-			maxBackoff := 3 * time.Second
-			backoffLimit := baseBackoff * (1 << (attempt - 1))
-			if backoffLimit > maxBackoff || backoffLimit <= 0 {
-				backoffLimit = maxBackoff
+	if j.Attempt == 0 {
+		c.logf("  [depth %d] Fetching: %s\n", j.Depth, j.URL)
+	} else {
+		c.logf("  [depth %d] Retrying (%d/%d): %s\n", j.Depth, j.Attempt, c.config.Retries, j.URL)
+	}
+
+	out := c.fetch(ctx, j.URL)
+	if out.retryable && j.Attempt < c.config.Retries && ctx.Err() == nil {
+		delay := out.retryAfter
+		if delay <= 0 {
+			delay = backoff(j.Attempt + 1)
+		}
+		c.sched.Retry(j, delay)
+		return
+	}
+
+	page := out.page
+	page.Depth = j.Depth
+	select {
+	case c.resultCh <- page:
+	case <-ctx.Done():
+		c.sched.Done(j)
+		return
+	}
+
+	// Children are pushed before Done so the scheduler never sees an empty
+	// frontier while this job's descendants are still being discovered.
+	if page.Error == "" && !out.noFollow && j.Depth < c.config.MaxDepth {
+		for _, link := range page.Links {
+			if ctx.Err() != nil {
+				break
 			}
-			jitter := time.Duration(rand.Int63n(int64(backoffLimit)))
-			select {
-			case <-ctx.Done():
-				return result.Page{URL: rawURL, Error: ctx.Err().Error()}, false
-			case <-time.After(jitter):
-			}
-		}
-
-		if err := ctx.Err(); err != nil {
-			return result.Page{URL: rawURL, Error: err.Error()}, false
-		}
-
-		domain := extractDomain(rawURL)
-
-		// Context-aware Rate Limiter Wait (can be aborted immediately by ctx)
-		if err := c.limiter.Wait(ctx, domain); err != nil {
-			return result.Page{URL: rawURL, Error: err.Error()}, false
-		}
-
-		if attempt == 0 {
-			fmt.Printf("  [depth %d] Fetching: %s\n", depth, rawURL)
-		} else {
-			fmt.Printf("  [depth %d] Retrying (%d/%d): %s\n", depth, attempt, c.config.Retries, rawURL)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-		if err != nil {
-			return result.Page{URL: rawURL, Error: err.Error()}, false
-		}
-		req.Header.Set("User-Agent", c.config.UserAgent)
-
-		resp, err := c.client.Do(req)
-		if err != nil {
-			lastPage = result.Page{URL: rawURL, Error: err.Error()}
-			continue
-		}
-
-		// 1.4 Rate Limit & Throttling: Handle 429 Too Many Requests & 503 Service Unavailable
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			retryAfterHeader := resp.Header.Get("Retry-After")
-			retryAfter := parseRetryAfter(retryAfterHeader)
-			if retryAfter > 0 {
-				// Dynamically throttle domain rate limiter
-				c.limiter.SetInterval(domain, retryAfter)
-			}
-			resp.Body.Close()
-			lastPage = result.Page{
-				URL:        rawURL,
-				StatusCode: resp.StatusCode,
-				Error:      fmt.Sprintf("HTTP %d: %s (Retry-After: %s)", resp.StatusCode, http.StatusText(resp.StatusCode), retryAfterHeader),
-			}
-			continue
-		}
-
-		// Check for transient 5xx server error
-		if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
-			resp.Body.Close()
-			lastPage = result.Page{
-				URL:        rawURL,
-				StatusCode: resp.StatusCode,
-				Error:      fmt.Sprintf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode)),
-			}
-			continue
-		}
-
-		// 1.5 Content-Type Guard
-		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-		lowerContentType := strings.ToLower(contentType)
-		if !strings.HasPrefix(lowerContentType, "text/html") &&
-			!strings.HasPrefix(lowerContentType, "application/xhtml+xml") {
-			resp.Body.Close()
-			return result.Page{
-				URL:        rawURL,
-				StatusCode: resp.StatusCode,
-				Error:      fmt.Sprintf("skipped non-HTML content type: %q", contentType),
-			}, false
-		}
-
-		// Size guard: check Content-Length header to avoid downloading huge files
-		if resp.ContentLength > c.config.MaxBodyBytes {
-			resp.Body.Close()
-			return result.Page{
-				URL:        rawURL,
-				StatusCode: resp.StatusCode,
-				Error:      fmt.Sprintf("skipped response exceeding max size: %d bytes (limit %d bytes)", resp.ContentLength, c.config.MaxBodyBytes),
-			}, false
-		}
-
-		// 1.5 Safe Body Size Cap & Charset Decoding
-		htmlStr, err := decodeHTMLBody(resp.Body, contentType, c.config.MaxBodyBytes)
-		resp.Body.Close()
-		if err != nil {
-			return result.Page{URL: rawURL, StatusCode: resp.StatusCode, Error: err.Error()}, false
-		}
-
-		// Extract metadata, canonical URL, and links using WHATWG parser
-		meta := parser.ExtractMetadata(htmlStr)
-
-		var payloadPath string
-		if c.config.BlobStore != nil {
-			if compressed, compErr := blobstore.CompressGzip([]byte(htmlStr)); compErr == nil {
-				key := blobstore.FormatPayloadKey(c.config.JobID, storage.HashURL(rawURL))
-				if putErr := c.config.BlobStore.Put(ctx, key, compressed, "application/gzip"); putErr == nil {
-					payloadPath = key
-				}
+			if resolved := c.resolveURL(j.URL, link); resolved != "" {
+				c.enqueue(ctx, resolved, j.Depth+1)
 			}
 		}
+	}
+	c.sched.Done(j)
+}
 
-		return result.Page{
+// backoff returns a full-jitter exponential delay: rand(0, min(3s, 50ms*2^(attempt-1))).
+func backoff(attempt int) time.Duration {
+	const base, ceiling = 50 * time.Millisecond, 3 * time.Second
+	limit := base << (attempt - 1)
+	if limit > ceiling || limit <= 0 {
+		limit = ceiling
+	}
+	return time.Duration(rand.Int63n(int64(limit)))
+}
+
+type fetchOutcome struct {
+	page       result.Page
+	noFollow   bool
+	retryable  bool
+	retryAfter time.Duration
+}
+
+// fetch performs a single HTTP GET and classifies the outcome. Retry policy
+// is applied by the caller through the scheduler.
+func (c *Crawler) fetch(ctx context.Context, rawURL string) fetchOutcome {
+	fail := func(code int, msg string, retryable bool) fetchOutcome {
+		return fetchOutcome{page: result.Page{URL: rawURL, StatusCode: code, Error: msg}, retryable: retryable}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail(0, err.Error(), false)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fail(0, err.Error(), false)
+	}
+	req.Header.Set("User-Agent", c.config.UserAgent)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		blocked := errors.Is(err, netguard.ErrBlockedPrivateIP) || errors.Is(err, netguard.ErrNoSafeIPFound)
+		return fail(0, err.Error(), !blocked && ctx.Err() == nil)
+	}
+	defer resp.Body.Close()
+
+	host := urlnorm.Host(rawURL)
+
+	// 429 Too Many Requests / 503 Service Unavailable: honour Retry-After and
+	// slow the host down for the rest of the crawl.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		header := resp.Header.Get("Retry-After")
+		retryAfter := parseRetryAfter(header)
+		if retryAfter > 0 {
+			c.limiter.SetInterval(host, retryAfter)
+		}
+		out := fail(resp.StatusCode, fmt.Sprintf("HTTP %d: %s (Retry-After: %s)", resp.StatusCode, http.StatusText(resp.StatusCode), header), true)
+		out.retryAfter = retryAfter
+		return out
+	}
+
+	if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+		return fail(resp.StatusCode, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode)), true)
+	}
+
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	lower := strings.ToLower(contentType)
+	if !strings.HasPrefix(lower, "text/html") && !strings.HasPrefix(lower, "application/xhtml+xml") {
+		return fail(resp.StatusCode, fmt.Sprintf("skipped non-HTML content type: %q", contentType), false)
+	}
+
+	if resp.ContentLength > c.config.MaxBodyBytes {
+		return fail(resp.StatusCode, fmt.Sprintf("skipped response exceeding max size: %d bytes (limit %d bytes)", resp.ContentLength, c.config.MaxBodyBytes), false)
+	}
+
+	htmlStr, err := decodeHTMLBody(resp.Body, contentType, c.config.MaxBodyBytes)
+	if err != nil {
+		return fail(resp.StatusCode, err.Error(), false)
+	}
+
+	meta := parser.ExtractMetadata(htmlStr)
+
+	var payloadPath string
+	if c.config.BlobStore != nil {
+		if compressed, compErr := blobstore.CompressGzip([]byte(htmlStr)); compErr == nil {
+			key := blobstore.FormatPayloadKey(c.config.JobID, storage.HashURL(rawURL))
+			if putErr := c.config.BlobStore.Put(ctx, key, compressed, "application/gzip"); putErr == nil {
+				payloadPath = key
+			}
+		}
+	}
+
+	return fetchOutcome{
+		page: result.Page{
 			URL:          rawURL,
 			Title:        meta.Title,
 			CanonicalURL: meta.Canonical,
@@ -386,129 +396,138 @@ func (c *Crawler) fetch(ctx context.Context, rawURL string, depth int) (result.P
 			PayloadPath:  payloadPath,
 			Links:        meta.Links,
 			StatusCode:   resp.StatusCode,
-		}, meta.NoFollow
+		},
+		noFollow: meta.NoFollow,
 	}
-
-	return lastPage, false
 }
 
-// enqueue adds a URL to the job channel if permitted by spider-trap rules, robots.txt,
-// domain caps, and global max page limits.
+// enqueue normalizes rawURL, applies admission rules and hands the job to
+// the scheduler. It never blocks on the network or on queue capacity.
 func (c *Crawler) enqueue(ctx context.Context, rawURL string, depth int) {
 	if ctx.Err() != nil {
 		return
 	}
 
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
+	norm, err := urlnorm.Normalize(rawURL)
+	if err != nil {
 		return
 	}
-
-	// 1.7 Spider-Trap & Runaway Protections
+	u, err := url.Parse(norm)
+	if err != nil {
+		return
+	}
 	if isSpiderTrap(u) {
 		return
 	}
+	host := u.Host
 
-	// Check robots.txt rules before admitting URL
-	if !c.isAllowedByRobots(ctx, rawURL) {
+	// Fast-path robots check when the host's policy is already cached.
+	c.robotsMu.RLock()
+	policy, known := c.robotsCache[host]
+	c.robotsMu.RUnlock()
+	if known && !policy.IsAllowed(u.Path) {
 		return
 	}
 
-	// Check and update visited set
+	// Deduplication, tier 0: in-process set of 64-bit fingerprints. This is
+	// the authority for URLs discovered but not yet persisted; the external
+	// deduplicator's DB tier only sees URLs after the batch writer flushes,
+	// so it cannot catch a URL rediscovered while its first fetch is pending.
+	fp := urlnorm.Hash64(norm)
 	c.visitedMu.Lock()
-	if c.visited[rawURL] {
+	if _, seen := c.visited[fp]; seen {
 		c.visitedMu.Unlock()
 		return
 	}
-	c.visited[rawURL] = true
+	c.visited[fp] = struct{}{}
 	c.visitedMu.Unlock()
 
-	// 3.2 Two-Tier Deduplication (Tier 1 Bloom Filter + Tier 2 Database Verification)
+	// Tiers 1+2: shared Bloom filter + exact DB check, which survive restarts
+	// and are shared across crawler processes.
 	if c.config.Dedup != nil {
-		shouldCrawl, err := c.config.Dedup.ShouldCrawl(ctx, c.config.JobID, rawURL)
-		if err != nil || !shouldCrawl {
+		ok, err := c.config.Dedup.ShouldCrawl(ctx, c.config.JobID, norm)
+		if err != nil || !ok {
 			return
 		}
 	}
 
-	domain := strings.ToLower(u.Host)
-
-	// 1.7 Per-Domain Page Cap
-	if c.config.MaxPagesPerDomain > 0 {
-		c.domainCountMu.Lock()
-		if c.domainCount[domain] >= c.config.MaxPagesPerDomain {
-			c.domainCountMu.Unlock()
-			return
-		}
-		c.domainCount[domain]++
-		c.domainCountMu.Unlock()
-	}
-
-	// Global Max Pages Limit
-	if c.config.MaxPages > 0 {
-		c.pageCountMu.Lock()
-		if c.pageCount >= c.config.MaxPages {
-			c.pageCountMu.Unlock()
-			return
-		}
-		c.pageCount++
-		c.pageCountMu.Unlock()
-	}
-
-	if ctx.Err() != nil {
+	if !c.reserveSlot(host) {
 		return
 	}
 
-	c.jobWg.Add(1)
-	select {
-	case c.jobCh <- job{url: rawURL, depth: depth}:
-	case <-ctx.Done():
-		c.jobWg.Done()
-	}
+	c.sched.Push(scheduler.Job{URL: norm, Host: host, Depth: depth})
 }
 
-// isAllowedByRobots checks if the URL path is allowed by robots.txt and triggers sitemap discovery.
-func (c *Crawler) isAllowedByRobots(ctx context.Context, rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
+// reserveSlot claims one unit of the global and per-host page budgets.
+func (c *Crawler) reserveSlot(host string) bool {
+	c.countMu.Lock()
+	defer c.countMu.Unlock()
+	if c.config.MaxPagesPerDomain > 0 && c.domainCount[host] >= c.config.MaxPagesPerDomain {
 		return false
 	}
-	domain := strings.ToLower(u.Host)
-
-	c.robotsMu.Lock()
-	policy, exists := c.robotsCache[domain]
-	c.robotsMu.Unlock()
-
-	if !exists {
-		policy = c.fetchRobotsPolicy(ctx, u.Scheme, domain)
-		c.robotsMu.Lock()
-		if existing, ok := c.robotsCache[domain]; ok {
-			policy = existing
-		} else {
-			c.robotsCache[domain] = policy
-			if policy != nil && policy.CrawlDelay > 0 {
-				c.limiter.SetInterval(domain, policy.CrawlDelay)
-			}
-		}
-		c.robotsMu.Unlock()
-
-		// 1.6 Sitemap discovery: Enqueue document URLs found in sitemaps
-		if policy != nil && len(policy.Sitemaps) > 0 {
-			go c.discoverSitemapURLs(ctx, policy.Sitemaps)
-		}
+	if c.config.MaxPages > 0 && c.pageCount >= c.config.MaxPages {
+		return false
 	}
-
-	if policy == nil {
-		return true
-	}
-	return policy.IsAllowed(u.Path)
+	c.domainCount[host]++
+	c.pageCount++
+	return true
 }
 
-func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) *robots.Policy {
+// releaseSlot returns a budget unit for a job that was admitted but never fetched.
+func (c *Crawler) releaseSlot(host string) {
+	c.countMu.Lock()
+	c.domainCount[host]--
+	c.pageCount--
+	c.countMu.Unlock()
+}
+
+// policyFor returns the cached robots.txt policy for u's host, fetching it
+// exactly once per host even under concurrent demand (singleflight).
+func (c *Crawler) policyFor(ctx context.Context, u *url.URL) *robots.Policy {
+	host := strings.ToLower(u.Host)
+	c.robotsMu.RLock()
+	p, ok := c.robotsCache[host]
+	c.robotsMu.RUnlock()
+	if ok {
+		return p
+	}
+
+	v, _, _ := c.robotsGroup.Do(host, func() (any, error) {
+		c.robotsMu.RLock()
+		p, ok := c.robotsCache[host]
+		c.robotsMu.RUnlock()
+		if ok {
+			return p, nil
+		}
+
+		p = c.fetchRobotsPolicy(ctx, u.Scheme, host)
+		if ctx.Err() != nil {
+			return p, nil // don't cache a policy produced by an aborted fetch
+		}
+		if p.CrawlDelay > 0 {
+			c.limiter.SetInterval(host, p.CrawlDelay)
+		}
+		c.robotsMu.Lock()
+		c.robotsCache[host] = p
+		c.robotsMu.Unlock()
+
+		if len(p.Sitemaps) > 0 {
+			c.sched.Hold()
+			go func() {
+				defer c.sched.Release()
+				c.discoverSitemapURLs(ctx, p.Sitemaps)
+			}()
+		}
+		return p, nil
+	})
+	return v.(*robots.Policy)
+}
+
+func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, host string) *robots.Policy {
 	if scheme == "" {
 		scheme = "http"
 	}
-	robotsURL := fmt.Sprintf("%s://%s/robots.txt", scheme, domain)
+	robotsURL := fmt.Sprintf("%s://%s/robots.txt", scheme, host)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotsURL, nil)
 	if err != nil {
 		return &robots.Policy{}
@@ -516,20 +535,19 @@ func (c *Crawler) fetchRobotsPolicy(ctx context.Context, scheme, domain string) 
 	req.Header.Set("User-Agent", c.config.UserAgent)
 
 	resp, err := c.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-		return &robots.Policy{}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
 		return &robots.Policy{}
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &robots.Policy{}
+	}
 
-	return robots.Parse(string(body), c.config.UserAgent)
+	body, err := readLimited(resp.Body, 512*1024)
+	if err != nil {
+		return &robots.Policy{}
+	}
+	return robots.Parse(body, c.config.UserAgent)
 }
 
 // discoverSitemapURLs fetches declared sitemaps and enqueues discovered URLs.
@@ -545,10 +563,11 @@ func (c *Crawler) discoverSitemapURLs(ctx context.Context, sitemapURLs []string)
 		req.Header.Set("User-Agent", c.config.UserAgent)
 
 		resp, err := c.client.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			continue
 		}
 
@@ -562,156 +581,28 @@ func (c *Crawler) discoverSitemapURLs(ctx context.Context, sitemapURLs []string)
 	}
 }
 
-// resolveURL converts a relative link to an absolute URL with canonicalization.
+// resolveURL converts a link found on base into a normalized absolute URL,
+// or "" if it should not be followed.
 func (c *Crawler) resolveURL(base, link string) string {
 	baseURL, err := url.Parse(base)
 	if err != nil {
 		return ""
 	}
-	linkURL, err := url.Parse(link)
+	linkURL, err := url.Parse(strings.TrimSpace(link))
 	if err != nil {
 		return ""
 	}
-
 	resolved := baseURL.ResolveReference(linkURL)
 
-	if resolved.Scheme != "http" && resolved.Scheme != "https" {
+	norm, err := urlnorm.NormalizeURL(resolved)
+	if err != nil {
 		return ""
 	}
-
-	if c.config.StayOnDomain && resolved.Host != baseURL.Host {
-		return ""
-	}
-
-	resolved.Fragment = ""
-	resolved.RawFragment = ""
-
-	if resolved.RawQuery != "" {
-		resolved.RawQuery = resolved.Query().Encode()
-	}
-
-	if len(resolved.Path) > 1 && strings.HasSuffix(resolved.Path, "/") {
-		resolved.Path = strings.TrimRight(resolved.Path, "/")
-	}
-
-	return resolved.String()
-}
-
-// extractDomain returns just the hostname from a URL string.
-func extractDomain(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	return strings.ToLower(u.Host)
-}
-
-// 1.7 isSpiderTrap checks for repetitive directory patterns and query parameter bloat.
-func isSpiderTrap(u *url.URL) bool {
-	// Guard against excessively long URLs
-	if len(u.String()) > 2048 {
-		return true
-	}
-
-	// Guard against query parameter explosions (e.g. tracking parameters, dynamic loops)
-	if len(u.Query()) > 10 {
-		return true
-	}
-
-	// Guard against recursive directory traps (e.g., /dir/dir/dir/...)
-	cleanPath := strings.Trim(u.Path, "/")
-	if cleanPath != "" {
-		segments := strings.Split(cleanPath, "/")
-		seen := make(map[string]int)
-		for _, s := range segments {
-			if s != "" {
-				seen[s]++
-				if seen[s] >= 3 {
-					return true
-				}
-			}
+	if c.config.StayOnDomain {
+		baseNorm, err := urlnorm.NormalizeURL(baseURL)
+		if err != nil || urlnorm.Host(norm) != urlnorm.Host(baseNorm) {
+			return ""
 		}
 	}
-
-	return false
-}
-
-// parseRetryAfter parses the Retry-After header as either seconds or an RFC 1123 HTTP-date.
-func parseRetryAfter(header string) time.Duration {
-	header = strings.TrimSpace(header)
-	if header == "" {
-		return 0
-	}
-
-	if secs, err := strconv.Atoi(header); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-
-	if t, err := http.ParseTime(header); err == nil {
-		diff := time.Until(t)
-		if diff > 0 {
-			return diff
-		}
-	}
-
-	return 0
-}
-
-// 1.5 decodeHTMLBody reads up to maxBytes and converts character encoding to UTF-8.
-func decodeHTMLBody(r io.Reader, contentType string, maxBytes int64) (string, error) {
-	bodyBytes, err := io.ReadAll(io.LimitReader(r, maxBytes))
-	if err != nil {
-		return "", err
-	}
-
-	charset := extractCharset(contentType)
-	if charset == "" {
-		charset = sniffCharsetFromHTML(bodyBytes)
-	}
-
-	if charset == "" || strings.EqualFold(charset, "utf-8") || strings.EqualFold(charset, "utf8") {
-		return string(bodyBytes), nil
-	}
-
-	enc, err := htmlindex.Get(charset)
-	if err != nil {
-		// Fallback to raw string if charset is unrecognized
-		return string(bodyBytes), nil
-	}
-
-	decoded, err := io.ReadAll(transform.NewReader(bytes.NewReader(bodyBytes), enc.NewDecoder()))
-	if err != nil {
-		return string(bodyBytes), nil
-	}
-
-	return string(decoded), nil
-}
-
-func extractCharset(contentType string) string {
-	parts := strings.Split(contentType, ";")
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "charset=") {
-			val := strings.TrimPrefix(lower, "charset=")
-			return strings.Trim(val, `"' `)
-		}
-	}
-	return ""
-}
-
-func sniffCharsetFromHTML(body []byte) string {
-	limit := 1024
-	if len(body) < limit {
-		limit = len(body)
-	}
-	preview := strings.ToLower(string(body[:limit]))
-	if idx := strings.Index(preview, "charset="); idx != -1 {
-		rest := preview[idx+8:]
-		end := strings.IndexAny(rest, `"' >/`)
-		if end != -1 {
-			return strings.TrimSpace(rest[:end])
-		}
-	}
-	return ""
+	return norm
 }

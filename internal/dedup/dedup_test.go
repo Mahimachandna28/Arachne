@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/mahimachandna28/webcrawler/internal/storage"
+	"github.com/Mahimachandna28/Arachne/internal/storage"
 )
 
 // mockVerifier implements ExactVerifier with an in-memory map.

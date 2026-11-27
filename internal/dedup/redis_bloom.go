@@ -11,12 +11,12 @@ import (
 // RedisBloom implements BloomStore backed by RedisBloom module (BF.ADD) with automatic
 // transparent fallback to Redis BitSet (SETBIT/GETBIT) for vanilla Redis servers.
 type RedisBloom struct {
-	client       *redis.Client
-	n            uint64
-	p            float64
-	m            uint64 // bitset size for fallback
-	k            uint   // hash function count for fallback
-	supportsBf   bool
+	client        *redis.Client
+	n             uint64
+	p             float64
+	m             uint64 // bitset size for fallback
+	k             uint   // hash function count for fallback
+	supportsBf    bool
 	checkedModule bool
 }
 

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mahimachandna28/webcrawler/internal/blobstore"
-	"github.com/mahimachandna28/webcrawler/internal/dedup"
-	"github.com/mahimachandna28/webcrawler/internal/result"
+	"github.com/Mahimachandna28/Arachne/internal/blobstore"
+	"github.com/Mahimachandna28/Arachne/internal/dedup"
+	"github.com/Mahimachandna28/Arachne/internal/result"
 )
 
 // mockServer creates a local test HTTP server with predefined pages.
@@ -54,12 +54,12 @@ func TestCrawler_BasicCrawl(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      3,
-		MaxDepth:     1,
-		RateLimit:    10 * time.Millisecond,
-		Timeout:      5 * time.Second,
-		MaxPages:     10,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         3,
+		MaxDepth:        1,
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -95,12 +95,12 @@ func TestCrawler_WorkerPool_Concurrency(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      5, // 5 concurrent workers
-		MaxDepth:     1,
-		RateLimit:    0, // No rate limiting for speed test
-		Timeout:      5 * time.Second,
-		MaxPages:     10,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         5, // 5 concurrent workers
+		MaxDepth:        1,
+		RateLimit:       0, // No rate limiting for speed test
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -121,12 +121,12 @@ func TestCrawler_NoDuplicates(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      3,
-		MaxDepth:     2, // Depth 2 means we'll encounter / multiple times via links
-		RateLimit:    10 * time.Millisecond,
-		Timeout:      5 * time.Second,
-		MaxPages:     50,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         3,
+		MaxDepth:        2, // Depth 2 means we'll encounter / multiple times via links
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        50,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -151,12 +151,12 @@ func TestCrawler_MaxPages(t *testing.T) {
 
 	maxPages := 2
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      3,
-		MaxDepth:     3,
-		RateLimit:    10 * time.Millisecond,
-		Timeout:      5 * time.Second,
-		MaxPages:     maxPages,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         3,
+		MaxDepth:        3,
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        maxPages,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -192,12 +192,12 @@ func TestCrawler_ResultCh_ExceedBufferDeadlock(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/p0"},
-		Workers:      2, // resultCh buffer is 2*20 = 40
-		MaxDepth:     totalPages + 1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     totalPages, // 45 > 40 (exceeds resultCh buffer)
+		Seeds:           []string{server.URL + "/p0"},
+		Workers:         2, // resultCh buffer is 2*20 = 40
+		MaxDepth:        totalPages + 1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        totalPages, // 45 > 40 (exceeds resultCh buffer)
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -260,12 +260,12 @@ Crawl-delay: 0.05
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      2,
-		MaxDepth:     3,
-		RateLimit:    10 * time.Millisecond,
-		Timeout:      5 * time.Second,
-		MaxPages:     10,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         2,
+		MaxDepth:        3,
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -302,12 +302,12 @@ func TestCrawler_ContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      3,
-		MaxDepth:     100,
-		RateLimit:    10 * time.Millisecond,
-		Timeout:      5 * time.Second,
-		MaxPages:     1000,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         3,
+		MaxDepth:        100,
+		RateLimit:       10 * time.Millisecond,
+		Timeout:         5 * time.Second,
+		MaxPages:        1000,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -343,12 +343,12 @@ func TestCrawler_ContextTimeout(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      2,
-		MaxDepth:     100,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1000,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         2,
+		MaxDepth:        100,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1000,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -392,15 +392,15 @@ func TestCrawler_RetriesWithBackoff(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/flaky"},
-		Workers:      1,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1,
+		Seeds:           []string{server.URL + "/flaky"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
-		Retries:      2, // Should retry twice and succeed on 3rd attempt
+		Retries:         2, // Should retry twice and succeed on 3rd attempt
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -442,15 +442,15 @@ func TestCrawler_RetriesExhausted(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/broken"},
-		Workers:      1,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1,
+		Seeds:           []string{server.URL + "/broken"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
-		Retries:      2,
+		Retries:         2,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -498,12 +498,12 @@ func TestCrawler_ContentTypeGuard(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/valid.html"},
-		Workers:      2,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     10,
+		Seeds:           []string{server.URL + "/valid.html"},
+		Workers:         2,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -554,12 +554,12 @@ func TestCrawler_SizeGuard(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/huge.html"},
-		Workers:      1,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1,
+		Seeds:           []string{server.URL + "/huge.html"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -593,12 +593,12 @@ func TestCrawler_UserAgentHeader(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      1,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -635,15 +635,15 @@ func TestCrawler_CustomUserAgentHeader(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      1,
-		MaxDepth:     1,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     1,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         1,
+		MaxDepth:        1,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        1,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
-		UserAgent:    customUA,
+		UserAgent:       customUA,
 	}
 
 	results := New(cfg).Run(context.Background())
@@ -725,12 +725,12 @@ func TestCrawler_DuplicateCanonicalURLsNotCrawled(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{
-		Seeds:        []string{server.URL + "/"},
-		Workers:      2,
-		MaxDepth:     2,
-		RateLimit:    0,
-		Timeout:      5 * time.Second,
-		MaxPages:     10,
+		Seeds:           []string{server.URL + "/"},
+		Workers:         2,
+		MaxDepth:        2,
+		RateLimit:       0,
+		Timeout:         5 * time.Second,
+		MaxPages:        10,
 		StayOnDomain:    true,
 		AllowPrivateIPs: true,
 	}
@@ -1064,5 +1064,3 @@ func TestCrawler_TwoTierDeduplication(t *testing.T) {
 		t.Errorf("Expected at least 2 Tier1Negatives, got %d", metrics.Tier1Negatives)
 	}
 }
-
-

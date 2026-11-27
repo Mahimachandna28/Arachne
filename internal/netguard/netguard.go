@@ -61,30 +61,30 @@ func (g *Guard) initBlockedRanges() {
 	cidrs := []string{
 		// IPv4 Private & Reserved (RFC 1918, RFC 5735, RFC 3927)
 		"0.0.0.0/8",          // Current network ("this" host)
-		"10.0.0.0/8",          // Private network (RFC 1918)
-		"100.64.0.0/10",       // Carrier-grade NAT (RFC 6598)
-		"127.0.0.0/8",         // Loopback
-		"169.254.0.0/16",      // Link-local & Cloud Metadata (169.254.169.254)
-		"172.16.0.0/12",       // Private network (RFC 1918)
-		"192.0.0.0/24",        // IETF Protocol Assignments
-		"192.0.2.0/24",        // TEST-NET-1
-		"192.88.99.0/24",      // 6to4 Relay Anycast
-		"192.168.0.0/16",      // Private network (RFC 1918)
-		"198.18.0.0/15",       // Network benchmark tests
-		"198.51.100.0/24",     // TEST-NET-2
-		"203.0.113.0/24",      // TEST-NET-3
-		"224.0.0.0/4",         // Multicast
-		"240.0.0.0/4",         // Reserved for future use
-		"255.255.255.255/32",  // Broadcast
+		"10.0.0.0/8",         // Private network (RFC 1918)
+		"100.64.0.0/10",      // Carrier-grade NAT (RFC 6598)
+		"127.0.0.0/8",        // Loopback
+		"169.254.0.0/16",     // Link-local & Cloud Metadata (169.254.169.254)
+		"172.16.0.0/12",      // Private network (RFC 1918)
+		"192.0.0.0/24",       // IETF Protocol Assignments
+		"192.0.2.0/24",       // TEST-NET-1
+		"192.88.99.0/24",     // 6to4 Relay Anycast
+		"192.168.0.0/16",     // Private network (RFC 1918)
+		"198.18.0.0/15",      // Network benchmark tests
+		"198.51.100.0/24",    // TEST-NET-2
+		"203.0.113.0/24",     // TEST-NET-3
+		"224.0.0.0/4",        // Multicast
+		"240.0.0.0/4",        // Reserved for future use
+		"255.255.255.255/32", // Broadcast
 
 		// IPv6 Private & Reserved (RFC 4193, RFC 4291, RFC 5156)
-		"::/128",              // Unspecified
-		"::1/128",             // Loopback
-		"100::/64",            // Discard-only
-		"2001:db8::/32",       // Documentation
-		"fc00::/7",            // Unique Local Address (ULA)
-		"fe80::/10",           // Link-local Unicast
-		"ff00::/8",            // Multicast
+		"::/128",        // Unspecified
+		"::1/128",       // Loopback
+		"100::/64",      // Discard-only
+		"2001:db8::/32", // Documentation
+		"fc00::/7",      // Unique Local Address (ULA)
+		"fe80::/10",     // Link-local Unicast
+		"ff00::/8",      // Multicast
 	}
 
 	for _, cidr := range cidrs {
